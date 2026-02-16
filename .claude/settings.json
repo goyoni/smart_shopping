@@ -2,12 +2,24 @@
   "hooks": {
     "PreCommit": [
       {
+        "matcher": "**/*",
+        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/check_branch.sh"
+      },
+      {
         "matcher": "src/backend/**/*.py",
         "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/unit -v --tb=short 2>&1 | tail -20"
       },
       {
         "matcher": "src/mcp_servers/**/*.py",
         "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/mcp -v --tb=short 2>&1 | tail -20"
+      },
+      {
+        "matcher": "src/agents/**/*.py",
+        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/run_agent_evals.sh"
+      },
+      {
+        "matcher": "src/mcp_servers/**/*.py",
+        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/run_agent_evals.sh"
       }
     ]
   }

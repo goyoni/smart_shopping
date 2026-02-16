@@ -96,6 +96,9 @@ cd src/frontend && npm test
 python evals/eval_agent.py
 ```
 
+## Commit Workflow
+Before creating any commit, **always** run `/project:review` first. This launches a review sub-agent that analyzes staged changes for security issues, missing tests, and project convention violations. Only proceed with the commit if the review passes (no errors). Warnings are informational and do not block commits.
+
 ## Languages & Markets
 - Primary: Hebrew (RTL), English
 - Secondary: Arabic (RTL)
