@@ -1,0 +1,54 @@
+# Dependencies
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+node_modules/
+
+# Database
+*.db
+*.sqlite3
+
+# Environment
+.env
+.env.local
+!config/.env.*
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend build
+src/frontend/.next/
+src/frontend/out/
+
+# Test / Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Playwright
+test-results/
+
+# Evaluation results (keep test cases, ignore generated reports)
+evals/results/*.html
+evals/results/*.json
+
+# Secrets
+*.pem
+*.key
+credentials.json

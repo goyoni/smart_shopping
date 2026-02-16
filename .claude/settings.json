@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "PreCommit": [
+      {
+        "matcher": "src/backend/**/*.py",
+        "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/unit -v --tb=short 2>&1 | tail -20"
+      },
+      {
+        "matcher": "src/mcp_servers/**/*.py",
+        "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/mcp -v --tb=short 2>&1 | tail -20"
+      }
+    ]
+  }
+}

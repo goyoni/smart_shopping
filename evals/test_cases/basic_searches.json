@@ -1,0 +1,52 @@
+[
+  {
+    "id": "tc_001",
+    "name": "Basic refrigerator search",
+    "input": "quiet affordable refrigerator",
+    "expected": {
+      "min_results": 5,
+      "required_criteria": ["noise_level", "price"],
+      "language": "en"
+    }
+  },
+  {
+    "id": "tc_002",
+    "name": "Dimensional search",
+    "input": "black refrigerator that fits into a niche of 180hx95wx75d",
+    "expected": {
+      "min_results": 3,
+      "required_criteria": ["height", "width", "depth", "color"],
+      "language": "en"
+    }
+  },
+  {
+    "id": "tc_003",
+    "name": "Hebrew search",
+    "input": "מקרר שקט ומשתלם",
+    "expected": {
+      "min_results": 3,
+      "required_criteria": ["noise_level", "price"],
+      "language": "he"
+    }
+  },
+  {
+    "id": "tc_004",
+    "name": "Multi-product matching",
+    "input": "A built-in stove and microwave set for a small family",
+    "expected": {
+      "min_results": 2,
+      "required_criteria": ["brand", "color"],
+      "multi_product": true,
+      "product_types": ["stove", "microwave"]
+    }
+  },
+  {
+    "id": "tc_005",
+    "name": "Semantic color matching",
+    "input": "dark nirosta colored microwave",
+    "expected": {
+      "min_results": 3,
+      "semantic_colors": ["matt black", "charcoal", "dark stainless steel", "nirosta"]
+    }
+  }
+]
