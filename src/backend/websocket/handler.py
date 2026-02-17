@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 
 websocket_router = APIRouter()
 
@@ -25,4 +29,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str) -> None:
 async def send_status(session_id: str, message: str) -> None:
     ws = _connections.get(session_id)
     if ws:
-        await ws.send_json({"type": "status", "message": message})
+        try:
+            await ws.send_json({"type": "status", "message": message})
+        except Exception:
+            logger.warning("Failed to send status to session %s, removing connection", session_id)
+            _connections.pop(session_id, None)

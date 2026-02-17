@@ -6,9 +6,12 @@ and orchestrates the full search workflow.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from src.shared.models import ProductResult, SearchStatus
+
+StatusCallback = Callable[[str, str], Awaitable[None]]
 
 
 @dataclass
@@ -27,8 +30,13 @@ class AgentState:
 class MainAgent:
     """Orchestrates the shopping workflow across MCP servers."""
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        status_callback: StatusCallback | None = None,
+    ) -> None:
         self.state = AgentState(session_id=session_id)
+        self._status_callback = status_callback
 
     async def process_query(self, query: str, language: str = "en") -> AgentState:
         """Process a user search query through the full pipeline.
@@ -44,11 +52,14 @@ class MainAgent:
         self.state.query = query
         self.state.language = language
         self.state.status = SearchStatus.IN_PROGRESS
-        self._add_status("Started search...")
+        await self._add_status("Started search...")
 
-        # TODO: Implement the full agentic workflow
+        # Echo result for Phase 1 — will be replaced by full agentic workflow
+        self.state.results = [
+            ProductResult(name=f"Echo: {query}", model="echo-v1"),
+        ]
         self.state.status = SearchStatus.COMPLETED
-        self._add_status("Search complete (no results yet - not implemented)")
+        await self._add_status("Search complete")
         return self.state
 
     async def refine_search(self, refinement: str) -> AgentState:
@@ -59,5 +70,7 @@ class MainAgent:
         # TODO: Implement refinement logic
         return self.state
 
-    def _add_status(self, message: str) -> None:
+    async def _add_status(self, message: str) -> None:
         self.state.status_messages.append(message)
+        if self._status_callback:
+            await self._status_callback(self.state.session_id, message)
