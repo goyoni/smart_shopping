@@ -3,6 +3,8 @@
 ## Project Overview
 An agentic app that helps users shop online by discovering products, comparing prices, and matching multi-product sets. Uses adaptive web scraping (no hardcoded site logic) with MCP-based architecture.
 
+For the full product guideline including example tasks, UI specs, technical architecture, MVP phases, and agent team structure, see [docs/product_guideline.md](docs/product_guideline.md).
+
 ## Tech Stack
 - **Backend**: Python 3.12+, FastAPI, SQLAlchemy ORM, SQLite (dev) / PostgreSQL (prod)
 - **Frontend**: Next.js 14 (App Router), TypeScript, WebSocket for real-time updates
