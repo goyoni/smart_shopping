@@ -21,19 +21,43 @@ def test_seller_model():
 def test_product_result_model():
     product = ProductResult(
         name="Test Fridge",
-        model="FR-100",
+        model_id="FR-100",
+        brand="TestBrand",
+        product_type="refrigerator",
+        category="kitchen appliances",
         criteria={"noise_level": "35dB", "energy_rating": "A++"},
         sellers=[Seller(name="Store A", price=500)],
     )
     assert product.name == "Test Fridge"
+    assert product.model_id == "FR-100"
+    assert product.brand == "TestBrand"
+    assert product.product_type == "refrigerator"
+    assert product.category == "kitchen appliances"
     assert len(product.sellers) == 1
     assert product.criteria["noise_level"] == "35dB"
+
+
+def test_product_result_defaults():
+    product = ProductResult(name="Minimal Product")
+    assert product.model_id is None
+    assert product.brand is None
+    assert product.product_type is None
+    assert product.category is None
+    assert product.criteria == {}
+    assert product.sellers == []
+    assert product.image_url is None
 
 
 def test_search_request_defaults():
     req = SearchRequest(query="test")
     assert req.language == "en"
     assert req.session_id is None
+    assert req.market is None
+
+
+def test_search_request_with_market():
+    req = SearchRequest(query="test", market="il")
+    assert req.market == "il"
 
 
 def test_search_response_model():

@@ -26,7 +26,10 @@ class Seller(BaseModel):
 
 class ProductResult(BaseModel):
     name: str
-    model: str | None = None
+    model_id: str | None = None
+    brand: str | None = None
+    product_type: str | None = None
+    category: str | None = None
     criteria: dict[str, str | float | bool] = Field(default_factory=dict)
     sellers: list[Seller] = Field(default_factory=list)
     image_url: str | None = None
@@ -36,6 +39,7 @@ class SearchRequest(BaseModel):
     query: str
     session_id: str | None = None
     language: str = "en"
+    market: str | None = None
 
 
 class SearchResponse(BaseModel):
