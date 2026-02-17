@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from src.agents.main_agent import MainAgent
 from src.backend.db.engine import async_session
 from src.backend.db.models import SearchHistory
 from src.backend.websocket.handler import send_status
+from src.shared.geo import detect_market, get_client_ip
 from src.shared.models import SearchRequest, SearchResponse
 
 router = APIRouter()
@@ -22,11 +23,19 @@ async def health_check() -> dict[str, str]:
 
 
 @router.post("/search", response_model=SearchResponse)
-async def search(request: SearchRequest) -> SearchResponse:
+async def search(request: SearchRequest, raw_request: Request) -> SearchResponse:
     session_id = request.session_id or uuid.uuid4().hex
 
+    # Auto-detect market from client IP if not provided
+    market = request.market
+    if not market:
+        client_ip = get_client_ip(raw_request)
+        market = detect_market(client_ip)
+
     agent = MainAgent(session_id=session_id, status_callback=send_status)
-    state = await agent.process_query(request.query, language=request.language)
+    state = await agent.process_query(
+        request.query, language=request.language, market=market,
+    )
 
     async with async_session() as session:
         record = SearchHistory(
