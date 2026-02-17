@@ -21,6 +21,7 @@ dependencies = [
     "opentelemetry-api>=1.22.0",
     "opentelemetry-sdk>=1.22.0",
     "mcp>=1.0.0",
+    "geoip2>=4.8.0",
 ]
 
 [project.optional-dependencies]

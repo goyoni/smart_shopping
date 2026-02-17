@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     log_level: str = "DEBUG"
     log_format: str = "console"
     playwright_headless: bool = True
+    geoip_db_path: str = "data/GeoLite2-Country.mmdb"
 
     model_config = {"env_file": "config/.env.local", "extra": "ignore"}
 
