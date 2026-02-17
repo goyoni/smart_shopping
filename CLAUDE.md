@@ -99,10 +99,31 @@ python evals/eval_agent.py
 ```
 
 ## Sub-Agents
-The following custom slash commands are available as sub-agents. Use them when their scope matches the task:
 
-- **`/project:review`** — Code review agent. Run before every commit to check staged changes for security issues, missing tests, and convention violations.
-- **`/project:deploy-agent`** — Deployment and DevOps agent. Use for writing or fixing shell scripts in `scripts/`, environment setup issues, process management, and build/release automation.
+The following custom slash commands are available as specialized sub-agents. Use `/project:coordinator` for multi-domain tasks, or invoke a specific agent directly when the task clearly falls within one domain.
+
+### Agent Roster
+
+| Agent | Command | Scope |
+|-------|---------|-------|
+| **Coordinator** | `/project:coordinator` | Orchestrates team, breaks tasks into subtasks, delegates to agents |
+| **Frontend** | `/project:frontend` | Next.js 14 App Router, TypeScript, RTL, responsive design, WebSocket client |
+| **Backend** | `/project:backend` | FastAPI, SQLAlchemy ORM, API endpoints, WebSocket server, session management |
+| **MCP** | `/project:mcp` | MCP servers, adaptive scraping, tool interfaces, cache strategy |
+| **Testing** | `/project:testing` | Unit tests (pytest), e2e tests (Jest + Playwright), MCP server tests |
+| **Eval** | `/project:eval` | Agent evaluation test cases, eval suite, regression detection |
+| **Deploy** | `/project:deploy-agent` | Shell scripts, environment setup, CI/CD, process management |
+| **Review** | `/project:review` | Code review before commits, security checks, convention validation |
+| **Sanity** | `/project:sanity` | End-to-end local validation, service health checks, workflow testing |
+
+### Delegation Rules
+
+- **Multi-domain tasks:** Use `/project:coordinator` to analyze the task, break it into subtasks, and delegate to the right agents in order.
+- **Single-domain tasks:** Invoke the specific agent directly (e.g., `/project:frontend` for a UI-only change).
+- **After implementation:** Always run `/project:testing` if the implementing agent didn't write tests.
+- **Agent/MCP changes:** Run `/project:eval` to add evaluation test cases when agent behavior changes.
+- **Before every commit:** Run `/project:review` to check for security issues, missing tests, and convention violations.
+- **Before merging:** Run `/project:sanity` to validate the full system works end-to-end.
 
 ## Commit Workflow
 Before creating any commit, **always** run `/project:review` first. This launches a review sub-agent that analyzes staged changes for security issues, missing tests, and project convention violations. Only proceed with the commit if the review passes (no errors). Warnings are informational and do not block commits.
