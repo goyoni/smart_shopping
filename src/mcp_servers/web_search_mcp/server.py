@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 from mcp.server import Server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
+
+from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
+from src.mcp_servers.web_search_mcp.search import search_products
+from src.shared.browser import get_browser
 
 server = Server("web-search")
 
@@ -32,8 +38,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "urls": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of URLs to check",
+                        "items": {"type": "object"},
+                        "description": "List of URL objects with url, title, snippet fields",
                     }
                 },
                 "required": ["urls"],
@@ -44,9 +50,25 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    # TODO: Implement web search using Playwright
     if name == "search_products":
-        return [TextContent(type="text", text='{"urls": [], "status": "not_implemented"}')]
+        query = arguments["query"]
+        language = arguments.get("language", "en")
+        market = arguments.get("market", "us")
+        async with get_browser() as browser:
+            results = await search_products(browser, query, language, market)
+        urls_data = [
+            {"url": r.url, "title": r.title, "snippet": r.snippet}
+            for r in results
+        ]
+        return [TextContent(type="text", text=json.dumps({"urls": urls_data, "status": "ok"}))]
+
     elif name == "identify_ecommerce_sites":
-        return [TextContent(type="text", text='{"ecommerce_urls": [], "status": "not_implemented"}')]
+        urls_data = arguments["urls"]
+        signals = identify_ecommerce_sites(urls_data)
+        ecommerce_urls = [
+            {"url": s.url, "domain": s.domain, "confidence": s.confidence, "signals": s.signals}
+            for s in signals
+        ]
+        return [TextContent(type="text", text=json.dumps({"ecommerce_urls": ecommerce_urls, "status": "ok"}))]
+
     raise ValueError(f"Unknown tool: {name}")
