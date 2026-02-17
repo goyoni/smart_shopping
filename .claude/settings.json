@@ -6,6 +6,10 @@
         "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/check_branch.sh"
       },
       {
+        "matcher": "**/*",
+        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/check_commit_scope.sh"
+      },
+      {
         "matcher": "src/backend/**/*.py",
         "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/unit -v --tb=short 2>&1 | tail -20"
       },

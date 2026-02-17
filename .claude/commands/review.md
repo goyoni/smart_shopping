@@ -3,8 +3,9 @@ You are a code review sub-agent. Review all staged changes before they are commi
 ## Steps
 
 1. Run `git diff --cached` to get the staged changes.
-2. For each changed file, review the diff for the issues listed below.
-3. If needed, read the full file for additional context (e.g. to check for missing docstrings or type hints on unchanged public functions that interact with changed code).
+2. Run `git diff --cached --name-only` to get the list of changed files.
+3. For each changed file, review the diff for the issues listed below.
+4. If needed, read the full file for additional context (e.g. to check for missing docstrings or type hints on unchanged public functions that interact with changed code).
 
 ## What to Check
 
@@ -18,6 +19,16 @@ You are a code review sub-agent. Review all staged changes before they are commi
 - **Missing type hints**: Public function return types without type annotations.
 - **Missing tests**: Changed source files under `src/` that don't have a corresponding test file under `tests/`. For example, `src/backend/foo.py` should have `tests/unit/test_foo.py`.
 - **Project convention violations**: Anything that contradicts the rules in CLAUDE.md (e.g. hardcoded site-specific scraping logic, raw SQL instead of SQLAlchemy ORM, missing session_id propagation).
+- **Mixed sub-agent scopes**: Staged files should belong to a single sub-agent's scope. For example, don't mix `src/backend/` and `src/frontend/` changes in one commit. Flag if multiple scopes are detected.
+
+## Commit Message Reminder
+
+After the review, remind the committer to include the required git trailers:
+
+```
+Sub-agent: /project:<agent-name>
+Test-plan: <what tests were run and results>
+```
 
 ## Output Format
 
@@ -32,8 +43,15 @@ Print a structured report:
 ### Warnings
 - [file:line] Description of the warning
 
-### Info
-- Summary observations (e.g. "3 files changed, all have tests")
+### Scope Check
+- Files: <list of staged files>
+- Detected scope: <sub-agent scope>
+- Mixed scopes: yes/no
+
+### Commit Reminder
+Include these trailers in your commit message:
+  Sub-agent: /project:<detected-agent>
+  Test-plan: <tests to run>
 ```
 
 If there are no errors, print:
@@ -45,6 +63,12 @@ No errors found. Ready to commit.
 
 ### Warnings
 - (any warnings, or "None")
+
+### Scope Check
+- ...
+
+### Commit Reminder
+- ...
 ```
 
 ## Final Verdict

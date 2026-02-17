@@ -55,9 +55,25 @@ For the full product guideline including example tasks, UI specs, technical arch
 
 ## Git Conventions
 - **Branches**: `main` (prod), `develop` (dev baseline), `feature/<module>/<feature>`, `fix/<module>/<issue>`
-- **Module Tags**: API, WebApp, MCP-Search, MCP-Scraper, Agent, etc.
-- **Commits**: Clear description + test plan (what tests were run)
 - Never commit directly to `main`
+- **Small commits**: Each commit should cover a single sub-agent's scope. Do not mix backend and frontend changes in one commit. When a task spans multiple agents, create one commit per agent.
+- **Sub-agent trailer**: Every commit must include a `Sub-agent:` git trailer identifying which sub-agent authored the changes. Use the agent's command name.
+- **Test plan**: Include a `Test-plan:` trailer describing what tests were run.
+
+### Commit Message Format
+```
+Short description of what changed
+
+Optional longer explanation of context or rationale.
+
+Sub-agent: /project:backend
+Test-plan: pytest tests/unit -v (19 passed)
+```
+
+### Valid Sub-agent Values
+`/project:backend`, `/project:frontend`, `/project:mcp`, `/project:testing`,
+`/project:eval`, `/project:deploy-agent`, `/project:logging`, `/project:coordinator`,
+`/project:review`, `/project:sanity`
 
 ## Environment Setup
 ```bash
@@ -127,7 +143,19 @@ The following custom slash commands are available as specialized sub-agents. Use
 - **Before merging:** Run `/project:sanity` to validate the full system works end-to-end.
 
 ## Commit Workflow
-Before creating any commit, **always** run `/project:review` first. This launches a review sub-agent that analyzes staged changes for security issues, missing tests, and project convention violations. Only proceed with the commit if the review passes (no errors). Warnings are informational and do not block commits.
+1. **Stage** only the files belonging to one sub-agent's scope.
+2. **Run `/project:review`** on the staged changes. Only proceed if the review passes (no errors). Warnings are informational and do not block commits.
+3. **Commit** with a clear message and the required trailers (`Sub-agent:` and `Test-plan:`). Use a HEREDOC to format multi-line messages:
+```bash
+git commit -m "$(cat <<'EOF'
+Short description
+
+Sub-agent: /project:backend
+Test-plan: pytest tests/unit -v (23 passed)
+EOF
+)"
+```
+4. **Repeat** for each sub-agent scope until all changes are committed.
 
 ## Languages & Markets
 - Primary: Hebrew (RTL), English
