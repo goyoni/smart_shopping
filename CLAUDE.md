@@ -96,6 +96,12 @@ cd src/frontend && npm test
 python evals/eval_agent.py
 ```
 
+## Sub-Agents
+The following custom slash commands are available as sub-agents. Use them when their scope matches the task:
+
+- **`/project:review`** — Code review agent. Run before every commit to check staged changes for security issues, missing tests, and convention violations.
+- **`/project:deploy-agent`** — Deployment and DevOps agent. Use for writing or fixing shell scripts in `scripts/`, environment setup issues, process management, and build/release automation.
+
 ## Commit Workflow
 Before creating any commit, **always** run `/project:review` first. This launches a review sub-agent that analyzes staged changes for security issues, missing tests, and project convention violations. Only proceed with the commit if the review passes (no errors). Warnings are informational and do not block commits.
 
