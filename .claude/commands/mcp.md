@@ -44,3 +44,21 @@ Do not modify files outside `src/mcp_servers/` unless coordinating with another 
 - Mock external calls (web requests, Playwright) in tests.
 - Validate all tool inputs and outputs.
 - Log tool calls with `session_id` for tracing.
+
+## Logging (Agentic Logs)
+
+This agent owns the agentic logging layer. Every MCP tool call must produce an OpenTelemetry trace.
+
+- Import the shared tracer from `src/shared/logging` — never create tracers directly.
+- Attach `session_id` to every span using the context utilities from `src/shared/logging`.
+- For every tool call, create a span that captures:
+  - `tool_name`: Name of the MCP tool invoked.
+  - `input`: Tool input parameters (sanitized — no PII).
+  - `output`: Tool output (truncated if large, max 4KB in span attributes).
+  - `duration_ms`: Execution time.
+  - `status`: Success or error with error type and message.
+- Use nested spans for multi-step operations:
+  - Web Scraper: parent span for `scrape_page`, child spans for `load_strategy`, `execute_strategy`, `save_strategy`.
+  - Product Criteria: parent span for `research_criteria`, child spans for each web search and scrape.
+- Log scraping strategy decisions: which strategy was tried, cache hit/miss, fallback attempts.
+- In development, all spans export to console. In production, configure OTEL exporter via environment variables.

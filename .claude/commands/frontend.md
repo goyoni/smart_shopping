@@ -40,3 +40,23 @@ All work is in `src/frontend/`. Do not modify files outside this directory unles
 - Styles: CSS Modules or Tailwind (follow existing pattern in the codebase)
 - No inline styles for layout; use CSS classes
 - Accessibility: semantic HTML, aria labels, keyboard navigation
+
+## Logging (Engagement Logs)
+
+This agent owns the engagement logging layer. Track user actions for debugging and product metrics.
+
+- Use a shared analytics/logging utility in `src/frontend/lib/logger.ts`.
+- Every engagement event includes: `session_id`, `timestamp`, `event_type`, `event_data`.
+- Events to track:
+  - `search_initiated` — user submits a search query (include query text).
+  - `search_refined` — user refines an existing search.
+  - `result_clicked` — user clicks on a product result.
+  - `result_added_to_list` — user adds a product to shopping list.
+  - `result_removed_from_list` — user removes from shopping list.
+  - `contact_seller_clicked` — user clicks "Contact Seller".
+  - `page_viewed` — user navigates to a new page/tab.
+  - `websocket_connected` / `websocket_disconnected` — connection lifecycle.
+  - `error_displayed` — user sees an error message.
+- Send engagement events to the backend via `POST /api/events` (batched, non-blocking).
+- In development, also log events to `console.debug` for visibility.
+- Never log PII or sensitive user input in event_data.

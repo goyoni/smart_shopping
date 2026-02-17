@@ -37,3 +37,19 @@ Primary work is in `src/backend/` and `src/shared/`. Do not modify files outside
 - Use Python type hints on all function signatures.
 - Structured JSON logging via OpenTelemetry.
 - Error responses use consistent format with appropriate HTTP status codes.
+
+## Logging (Operational Logs)
+
+This agent owns the operational logging layer. Every backend operation must be logged.
+
+- Import the shared logger from `src/shared/logging` — never configure loggers directly.
+- Attach `session_id` to every log entry using the context utilities from `src/shared/logging`.
+- Log at these levels:
+  - `INFO`: Every API request (method, path, status code, duration_ms).
+  - `WARNING`: Degraded operations (slow queries, retry attempts, cache misses).
+  - `ERROR`: Failed operations with full context (exception type, message, stack trace).
+- Use OpenTelemetry spans for request lifecycle:
+  - Create a span in FastAPI middleware for each request.
+  - Child spans for database queries and MCP server calls.
+- Format: colorized console in local (`LOG_FORMAT=console`), structured JSON in dev/prod (`LOG_FORMAT=json`).
+- Never log sensitive data (user credentials, PII, API keys).

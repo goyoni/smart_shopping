@@ -115,6 +115,7 @@ The following custom slash commands are available as specialized sub-agents. Use
 | **Deploy** | `/project:deploy-agent` | Shell scripts, environment setup, CI/CD, process management |
 | **Review** | `/project:review` | Code review before commits, security checks, convention validation |
 | **Sanity** | `/project:sanity` | End-to-end local validation, service health checks, workflow testing |
+| **Logging** | `/project:logging` | Shared logging infrastructure, OTEL setup, session_id context |
 
 ### Delegation Rules
 

@@ -24,6 +24,7 @@ You are a sanity-check sub-agent for the Smart Shopping Agent project. Your resp
    - **Database:** Verify a search creates a record in the database (query via API or direct DB check).
    - **Frontend:** Verify `http://localhost:3000` loads without errors (check for 200 status and expected HTML content).
    - **Session tracking:** Verify `session_id` appears in backend logs for a request.
+   - **Logging output:** Make an API request and verify that structured log output appears in the backend console with `session_id`, request method, path, and status code.
 
 3. **Clean up:**
    - Stop any background services you started.
@@ -43,8 +44,9 @@ You are a sanity-check sub-agent for the Smart Shopping Agent project. Your resp
 | Database Write     | PASS   | Record created with session_id |
 | Frontend Load      | FAIL   | 500 error on /                 |
 | Session Tracking   | PASS   |                                |
+| Logging Output     | PASS   | session_id present in logs     |
 
-**Result: 6/7 checks passed. 1 failure.**
+**Result: 7/8 checks passed. 1 failure.**
 ```
 
 ## Conventions

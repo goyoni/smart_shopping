@@ -43,3 +43,12 @@ All work is in `tests/`:
 - Group related tests with classes or `describe` blocks.
 - Use factories/fixtures for test data, not hardcoded values scattered across tests.
 - Test both success paths and error paths.
+
+## Logging Verification
+
+When writing tests for code that includes logging, verify:
+
+- **Operational logs (backend):** Assert that key operations emit log entries at the correct level. Use `caplog` (pytest) to capture and inspect log output.
+- **Agentic logs (MCP):** Assert that tool calls create spans with expected attributes (tool_name, input, output, status). Use OpenTelemetry's `InMemorySpanExporter` in tests.
+- **Engagement logs (frontend):** Assert that user actions dispatch events with correct `event_type` and `event_data`. Mock the event sender and inspect calls.
+- **Session ID:** Assert that `session_id` is present in log entries and span attributes for any operation that receives a request context.

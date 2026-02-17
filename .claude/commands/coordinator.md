@@ -22,6 +22,7 @@ Delegate to these agents using `/project:<name>`:
 | Deployment Agent         | `/project:deploy-agent`    | Shell scripts, environment setup, CI/CD              |
 | Review Agent             | `/project:review`          | Code review before commits                           |
 | Sanity Agent             | `/project:sanity`          | End-to-end local validation                          |
+| Logging Agent            | `/project:logging`         | Shared logging infra, OTEL setup, session_id context |
 
 ## Steps
 
@@ -62,3 +63,4 @@ Delegate to these agents using `/project:<name>`:
 - All components share `session_id` for tracing — verify this in new code.
 - Database access must use SQLAlchemy ORM only.
 - No hardcoded site-specific scraping logic.
+- All new code must use the shared logger/tracer from `src/shared/logging` — delegate to Logging Agent if logging infrastructure needs changes.
