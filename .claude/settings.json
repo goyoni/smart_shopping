@@ -1,29 +1,45 @@
 {
   "hooks": {
-    "PreCommit": [
+    "PreToolUse": [
       {
-        "matcher": "**/*",
-        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/check_branch.sh"
+        "matcher": "Bash(git commit:*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/check_branch.sh"
+          },
+          {
+            "type": "command",
+            "command": "bash scripts/check_commit_scope.sh"
+          }
+        ]
       },
       {
-        "matcher": "**/*",
-        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/check_commit_scope.sh"
+        "matcher": "Bash(git commit:*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m pytest tests/unit -v --tb=short 2>&1 | tail -20"
+          }
+        ]
       },
       {
-        "matcher": "src/backend/**/*.py",
-        "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/unit -v --tb=short 2>&1 | tail -20"
+        "matcher": "Bash(git commit:*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m pytest tests/mcp -v --tb=short 2>&1 | tail -20"
+          }
+        ]
       },
       {
-        "matcher": "src/mcp_servers/**/*.py",
-        "command": "cd /Users/yonigo/smart_shopping_agent && python -m pytest tests/mcp -v --tb=short 2>&1 | tail -20"
-      },
-      {
-        "matcher": "src/agents/**/*.py",
-        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/run_agent_evals.sh"
-      },
-      {
-        "matcher": "src/mcp_servers/**/*.py",
-        "command": "cd /Users/yonigo/smart_shopping_agent && bash scripts/run_agent_evals.sh"
+        "matcher": "Bash(git commit:*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/run_agent_evals.sh"
+          }
+        ]
       }
     ]
   }
