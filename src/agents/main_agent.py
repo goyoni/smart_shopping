@@ -16,6 +16,8 @@ from src.shared.browser import get_browser
 from src.shared.logging import get_logger, get_tracer, set_session_id
 from src.shared.models import ProductResult, SearchStatus
 
+import json
+
 from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
@@ -82,10 +84,20 @@ class MainAgent:
                     with _tracer.start_as_current_span(
                         "search_web",
                         attributes={"query": query, "language": language, "market": market},
-                    ):
+                    ) as search_span:
                         search_results = await search_products(browser, query, language, market)
+                        search_span.set_attribute("result_count", len(search_results))
+                        if search_results:
+                            search_span.set_attribute(
+                                "output",
+                                json.dumps(
+                                    [{"url": r.url, "title": r.title} for r in search_results],
+                                    ensure_ascii=False,
+                                ),
+                            )
 
                     if not search_results:
+                        root_span.set_attribute("exit_reason", "no_search_results")
                         await self._add_status("No search results found")
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
@@ -95,14 +107,27 @@ class MainAgent:
                     with _tracer.start_as_current_span(
                         "detect_ecommerce",
                         attributes={"result_count": len(search_results)},
-                    ):
+                    ) as ecom_span:
                         urls_data = [
                             {"url": r.url, "title": r.title, "snippet": r.snippet}
                             for r in search_results
                         ]
                         ecommerce_signals = identify_ecommerce_sites(urls_data)
+                        ecom_span.set_attribute("ecommerce_count", len(ecommerce_signals))
+                        if ecommerce_signals:
+                            ecom_span.set_attribute(
+                                "output",
+                                json.dumps(
+                                    [
+                                        {"domain": s.domain, "url": s.url, "confidence": s.confidence}
+                                        for s in ecommerce_signals
+                                    ],
+                                    ensure_ascii=False,
+                                ),
+                            )
 
                     if not ecommerce_signals:
+                        root_span.set_attribute("exit_reason", "no_ecommerce_sites")
                         await self._add_status("No e-commerce sites found in results")
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
@@ -113,24 +138,38 @@ class MainAgent:
 
                     with _tracer.start_as_current_span(
                         "scrape_sites",
-                        attributes={"site_count": len(sites_to_scrape)},
-                    ):
+                        attributes={
+                            "site_count": len(sites_to_scrape),
+                            "input": json.dumps(
+                                [{"domain": s.domain, "url": s.url} for s in sites_to_scrape],
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ) as scrape_span:
                         all_products: list[ProductResult] = []
                         for signal in sites_to_scrape:
                             try:
                                 await self._add_status(f"Scraping {signal.domain}...")
                                 products = await scrape_page(browser, signal.url, query)
                                 all_products.extend(products)
+                                scrape_span.add_event(
+                                    signal.domain,
+                                    attributes={
+                                        "url": signal.url,
+                                        "product_count": len(products),
+                                    },
+                                )
                             except Exception as exc:
                                 logger.warning("Failed to scrape %s", signal.url, exc_info=True)
                                 trace.get_current_span().record_exception(exc)
                                 continue
 
-                        trace.get_current_span().set_attribute(
+                        scrape_span.set_attribute(
                             "product_count", len(all_products)
                         )
 
                     self.state.results = all_products
+                    root_span.set_attribute("total_product_count", len(all_products))
                     await self._add_status(f"Found {len(all_products)} products from {len(sites_to_scrape)} sites")
 
             except Exception as exc:

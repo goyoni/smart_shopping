@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
 from playwright.async_api import Browser, Page
 
-from src.shared.browser import get_page
+from opentelemetry import trace
 
-logger = logging.getLogger(__name__)
+from src.shared.browser import get_page
+from src.shared.logging import get_logger, get_tracer
+
+logger = get_logger(__name__)
+_tracer = get_tracer(__name__)
 
 _GOOGLE_DOMAINS: dict[str, str] = {
     "il": "google.co.il",
@@ -123,12 +126,15 @@ async def search_products(
     url = build_search_url(query, language, market)
     locale_map = {"he": "he-IL", "ar": "ar-SA", "en": "en-US"}
     locale = locale_map.get(language, "en-US")
+    span = trace.get_current_span()
+    span.set_attribute("search_url", url)
 
     async with get_page(browser, locale=locale) as page:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except Exception:
             logger.warning("Timeout navigating to Google search for '%s'", query)
+            span.set_attribute("exit_reason", "navigation_timeout")
             return []
 
         # Wait for search results to appear
@@ -136,14 +142,18 @@ async def search_products(
             await page.wait_for_selector("div#search", timeout=10000)
         except Exception:
             logger.warning("Search results did not load for '%s'", query)
+            span.set_attribute("exit_reason", "results_selector_timeout")
             return []
 
         # Check for CAPTCHA
         content = await page.content()
         if _is_captcha_page(content):
             logger.warning("CAPTCHA detected for query '%s'", query)
+            span.set_attribute("exit_reason", "captcha")
             return []
 
         results = await extract_search_results(page)
+        if not results:
+            span.set_attribute("exit_reason", "no_results_extracted")
         logger.info("Found %d search results for '%s'", len(results), query)
         return results
