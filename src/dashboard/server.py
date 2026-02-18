@@ -41,6 +41,7 @@ def main(argv: list[str] | None = None) -> None:
     storage_path = Path(args.storage_dir)
     storage_path.mkdir(parents=True, exist_ok=True)
     os.environ["PHOENIX_WORKING_DIR"] = str(storage_path.resolve())
+    os.environ["PHOENIX_PORT"] = str(args.port)
 
     import phoenix as px
 
@@ -48,10 +49,9 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Storage: {storage_path.resolve()}")
     print("Press Ctrl+C to stop.\n")
 
-    session = px.launch_app(port=args.port)
+    px.launch_app()
 
     try:
-        session.view()
         input("Phoenix is running. Press Enter or Ctrl+C to stop.\n")
     except (KeyboardInterrupt, EOFError):
         pass

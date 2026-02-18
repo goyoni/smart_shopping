@@ -27,11 +27,7 @@ def test_dashboard_creates_storage_dir(tmp_path: Path):
     storage = tmp_path / "nested" / "phoenix_store"
     assert not storage.exists()
 
-    mock_session = MagicMock()
     mock_px = MagicMock()
-    mock_px.launch_app.return_value = mock_session
-    # Simulate user pressing Enter to stop
-    mock_session.view.return_value = None
 
     with (
         patch.dict(sys.modules, {"phoenix": mock_px}),
