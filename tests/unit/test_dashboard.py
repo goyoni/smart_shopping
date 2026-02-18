@@ -28,11 +28,15 @@ def test_dashboard_creates_storage_dir(tmp_path: Path):
     assert not storage.exists()
 
     mock_px = MagicMock()
+    mock_event = MagicMock()
+    # Make wait() return immediately so the test doesn't block
+    mock_event.wait.return_value = None
+    mock_event.set.return_value = None
 
     with (
         patch.dict(sys.modules, {"phoenix": mock_px}),
         patch("src.dashboard.server.px", mock_px, create=True),
-        patch("builtins.input", side_effect=KeyboardInterrupt),
+        patch("src.dashboard.server.threading.Event", return_value=mock_event),
     ):
         # We need to re-import to pick up the patched module
         import importlib

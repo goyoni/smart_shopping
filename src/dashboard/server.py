@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
 
 
@@ -51,12 +53,13 @@ def main(argv: list[str] | None = None) -> None:
 
     px.launch_app()
 
-    try:
-        input("Phoenix is running. Press Enter or Ctrl+C to stop.\n")
-    except (KeyboardInterrupt, EOFError):
-        pass
-    finally:
-        print("\nShutting down Phoenix...")
+    # Block until SIGINT/SIGTERM. Using an Event instead of input() so
+    # the process survives being backgrounded (stdin closed).
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    stop.wait()
+    print("\nShutting down Phoenix...")
 
 
 if __name__ == "__main__":
