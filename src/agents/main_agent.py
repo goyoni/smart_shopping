@@ -78,14 +78,13 @@ class MainAgent:
             attributes={"query": query, "market": market},
         ) as root_span:
             try:
-                async with get_browser() as browser:
-                    # Step 1: Google search
+                    # Step 1: Google search (direct HTTP — no browser needed)
                     await self._add_status("Searching the web...")
                     with _tracer.start_as_current_span(
                         "search_web",
                         attributes={"query": query, "language": language, "market": market},
                     ) as search_span:
-                        search_results = await search_products(browser, query, language, market)
+                        search_results = await search_products(query, language, market)
                         search_span.set_attribute("result_count", len(search_results))
                         if search_results:
                             search_span.set_attribute(
@@ -132,41 +131,42 @@ class MainAgent:
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
 
-                    # Step 3: Scrape top e-commerce sites
+                    # Step 3: Scrape top e-commerce sites (browser needed here)
                     sites_to_scrape = ecommerce_signals[:_MAX_SITES_TO_SCRAPE]
                     await self._add_status(f"Scraping {len(sites_to_scrape)} e-commerce sites...")
 
-                    with _tracer.start_as_current_span(
-                        "scrape_sites",
-                        attributes={
-                            "site_count": len(sites_to_scrape),
-                            "input": json.dumps(
-                                [{"domain": s.domain, "url": s.url} for s in sites_to_scrape],
-                                ensure_ascii=False,
-                            ),
-                        },
-                    ) as scrape_span:
-                        all_products: list[ProductResult] = []
-                        for signal in sites_to_scrape:
-                            try:
-                                await self._add_status(f"Scraping {signal.domain}...")
-                                products = await scrape_page(browser, signal.url, query)
-                                all_products.extend(products)
-                                scrape_span.add_event(
-                                    signal.domain,
-                                    attributes={
-                                        "url": signal.url,
-                                        "product_count": len(products),
-                                    },
-                                )
-                            except Exception as exc:
-                                logger.warning("Failed to scrape %s", signal.url, exc_info=True)
-                                trace.get_current_span().record_exception(exc)
-                                continue
+                    async with get_browser() as browser:
+                        with _tracer.start_as_current_span(
+                            "scrape_sites",
+                            attributes={
+                                "site_count": len(sites_to_scrape),
+                                "input": json.dumps(
+                                    [{"domain": s.domain, "url": s.url} for s in sites_to_scrape],
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        ) as scrape_span:
+                            all_products: list[ProductResult] = []
+                            for signal in sites_to_scrape:
+                                try:
+                                    await self._add_status(f"Scraping {signal.domain}...")
+                                    products = await scrape_page(browser, signal.url, query)
+                                    all_products.extend(products)
+                                    scrape_span.add_event(
+                                        signal.domain,
+                                        attributes={
+                                            "url": signal.url,
+                                            "product_count": len(products),
+                                        },
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Failed to scrape %s", signal.url, exc_info=True)
+                                    trace.get_current_span().record_exception(exc)
+                                    continue
 
-                        scrape_span.set_attribute(
-                            "product_count", len(all_products)
-                        )
+                            scrape_span.set_attribute(
+                                "product_count", len(all_products)
+                            )
 
                     self.state.results = all_products
                     root_span.set_attribute("total_product_count", len(all_products))

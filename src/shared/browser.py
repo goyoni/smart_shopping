@@ -1,4 +1,4 @@
-"""Shared Playwright browser management with anti-detection."""
+"""Shared Playwright browser management with stealth configuration."""
 
 from __future__ import annotations
 
@@ -12,21 +12,14 @@ from src.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
-
 
 @asynccontextmanager
 async def get_browser() -> AsyncIterator[Browser]:
-    """Launch a headless Chromium browser with anti-detection measures."""
+    """Launch a headless Chromium browser for page scraping."""
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
         headless=settings.playwright_headless,
         args=[
-            "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
         ],
     )
@@ -39,9 +32,13 @@ async def get_browser() -> AsyncIterator[Browser]:
 
 @asynccontextmanager
 async def get_page(browser: Browser, locale: str = "en-US") -> AsyncIterator[Page]:
-    """Create a new page with realistic viewport and user-agent settings."""
+    """Create a new page with realistic viewport settings.
+
+    Uses Playwright's default User-Agent (which matches the bundled
+    Chromium version) to avoid fingerprint mismatches that trigger
+    bot detection.
+    """
     context = await browser.new_context(
-        user_agent=_USER_AGENT,
         viewport={"width": 1920, "height": 1080},
         locale=locale,
     )
