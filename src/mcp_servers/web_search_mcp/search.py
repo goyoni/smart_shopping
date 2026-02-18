@@ -154,6 +154,7 @@ async def search_products(
             )
             if attempt == _max_attempts:
                 span.set_attribute("exit_reason", "request_failed")
+                span.add_event("search_completed", {"exit_reason": "request_failed"})
                 return []
             continue
 
@@ -166,6 +167,7 @@ async def search_products(
             )
             if attempt == _max_attempts:
                 span.set_attribute("exit_reason", f"http_{response.status_code}")
+                span.add_event("search_completed", {"exit_reason": f"http_{response.status_code}"})
                 return []
             continue
 
@@ -173,9 +175,11 @@ async def search_products(
         results = extract_search_results(html)
         if not results:
             span.set_attribute("exit_reason", "no_results_extracted")
+            span.add_event("search_completed", {"result_count": 0, "exit_reason": "no_results_extracted"})
             logger.warning("No results extracted from HTML for '%s'", query)
             logger.warning("Response content (first 500 chars): %s", html[:500])
         else:
+            span.add_event("search_completed", {"result_count": len(results)})
             logger.info("Found %d search results for '%s'", len(results), query)
         return results
 

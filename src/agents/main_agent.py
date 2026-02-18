@@ -77,13 +77,15 @@ class MainAgent:
             "process_query",
             attributes={"query": query, "market": market},
         ) as root_span:
+            root_span.add_event("process_query.start", {"query": query, "market": market})
             try:
-                    # Step 1: Google search (direct HTTP — no browser needed)
+                    # Step 1: Web search (direct HTTP — no browser needed)
                     await self._add_status("Searching the web...")
                     with _tracer.start_as_current_span(
                         "search_web",
                         attributes={"query": query, "language": language, "market": market},
                     ) as search_span:
+                        search_span.add_event("search_web.start", {"query": query, "language": language, "market": market})
                         search_results = await search_products(query, language, market)
                         search_span.set_attribute("result_count", len(search_results))
                         if search_results:
@@ -94,9 +96,11 @@ class MainAgent:
                                     ensure_ascii=False,
                                 ),
                             )
+                        search_span.add_event("search_web.end", {"result_count": len(search_results)})
 
                     if not search_results:
                         root_span.set_attribute("exit_reason", "no_search_results")
+                        root_span.add_event("process_query.end", {"exit_reason": "no_search_results"})
                         await self._add_status("No search results found")
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
@@ -107,6 +111,7 @@ class MainAgent:
                         "detect_ecommerce",
                         attributes={"result_count": len(search_results)},
                     ) as ecom_span:
+                        ecom_span.add_event("detect_ecommerce.start", {"result_count": len(search_results)})
                         urls_data = [
                             {"url": r.url, "title": r.title, "snippet": r.snippet}
                             for r in search_results
@@ -124,9 +129,11 @@ class MainAgent:
                                     ensure_ascii=False,
                                 ),
                             )
+                        ecom_span.add_event("detect_ecommerce.end", {"ecommerce_count": len(ecommerce_signals)})
 
                     if not ecommerce_signals:
                         root_span.set_attribute("exit_reason", "no_ecommerce_sites")
+                        root_span.add_event("process_query.end", {"exit_reason": "no_ecommerce_sites"})
                         await self._add_status("No e-commerce sites found in results")
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
@@ -146,6 +153,7 @@ class MainAgent:
                                 ),
                             },
                         ) as scrape_span:
+                            scrape_span.add_event("scrape_sites.start", {"site_count": len(sites_to_scrape)})
                             all_products: list[ProductResult] = []
                             for signal in sites_to_scrape:
                                 try:
@@ -167,15 +175,18 @@ class MainAgent:
                             scrape_span.set_attribute(
                                 "product_count", len(all_products)
                             )
+                            scrape_span.add_event("scrape_sites.end", {"product_count": len(all_products)})
 
                     self.state.results = all_products
                     root_span.set_attribute("total_product_count", len(all_products))
+                    root_span.add_event("process_query.end", {"total_product_count": len(all_products)})
                     await self._add_status(f"Found {len(all_products)} products from {len(sites_to_scrape)} sites")
 
             except Exception as exc:
                 logger.error("Pipeline error for query '%s'", query, exc_info=True)
                 root_span.set_status(StatusCode.ERROR, str(exc))
                 root_span.record_exception(exc)
+                root_span.add_event("process_query.end", {"error": str(exc)})
                 self.state.status = SearchStatus.FAILED
                 await self._add_status("Search failed due to an error")
                 return self.state
