@@ -60,7 +60,6 @@ echo ""
 echo "Starting Smart Shopping Agent..."
 echo "  Backend:  http://localhost:$PORT"
 echo "  Frontend: http://localhost:3000"
-echo ""
 
 # Start backend in background
 uvicorn src.backend.main:app --reload --host "${BACKEND_HOST:-0.0.0.0}" --port "$PORT" &
@@ -72,17 +71,32 @@ npm run dev &
 FRONTEND_PID=$!
 cd "$REPO_ROOT"
 
-# Trap to clean up both processes on exit
+# Start Phoenix dashboard if installed
+PHOENIX_PID=""
+PHOENIX_PORT="${PHOENIX_PORT:-6006}"
+if python -c "import phoenix" 2>/dev/null; then
+    echo "  Dashboard: http://localhost:$PHOENIX_PORT"
+    python -m src.dashboard.server --port "$PHOENIX_PORT" &
+    PHOENIX_PID=$!
+else
+    echo "  Dashboard: not installed (pip install -e '.[dashboard]' to enable)"
+fi
+
+echo ""
+
+# Trap to clean up all processes on exit
 cleanup() {
     echo ""
     echo "Shutting down..."
     kill "$BACKEND_PID" 2>/dev/null || true
     kill "$FRONTEND_PID" 2>/dev/null || true
+    [ -n "$PHOENIX_PID" ] && kill "$PHOENIX_PID" 2>/dev/null || true
     wait "$BACKEND_PID" 2>/dev/null || true
     wait "$FRONTEND_PID" 2>/dev/null || true
+    [ -n "$PHOENIX_PID" ] && wait "$PHOENIX_PID" 2>/dev/null || true
     echo "Done."
 }
 trap cleanup EXIT INT TERM
 
-# Wait for either process to exit
+# Wait for any process to exit
 wait
