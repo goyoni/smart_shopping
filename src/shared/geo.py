@@ -7,7 +7,7 @@ from src.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_MARKET = "us"
+_DEFAULT_MARKET = settings.default_market
 
 
 def detect_market(ip_address: str) -> str:

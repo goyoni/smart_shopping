@@ -6,6 +6,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from src.shared.config import settings
+
 
 class SearchStatus(str, Enum):
     PENDING = "pending"
@@ -38,7 +40,7 @@ class ProductResult(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     session_id: str | None = None
-    language: str = "en"
+    language: str = settings.default_language
     market: str | None = None
 
 

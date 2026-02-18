@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./smart_shopping.db"
     log_level: str = "DEBUG"
     log_format: str = "console"
+    default_language: str = "en"
+    default_market: str = "us"
     playwright_headless: bool = True
     geoip_db_path: str = "data/GeoLite2-Country.mmdb"
     otel_exporter_endpoint: str = ""
