@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.shared.config import settings
 from src.shared.models import (
     ProductResult,
     SearchRequest,
@@ -50,7 +51,7 @@ def test_product_result_defaults():
 
 def test_search_request_defaults():
     req = SearchRequest(query="test")
-    assert req.language == "en"
+    assert req.language == settings.default_language
     assert req.session_id is None
     assert req.market is None
 

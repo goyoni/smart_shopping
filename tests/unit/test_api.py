@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.agents.main_agent import AgentState
 from src.backend.main import app
+from src.shared.config import settings
 from src.shared.models import ProductResult, SearchStatus, Seller
 
 
@@ -71,7 +72,7 @@ async def test_search_passes_market(client: AsyncClient):
 
     assert response.status_code == 200
     instance.process_query.assert_awaited_once_with(
-        "laptop", language="en", market="il",
+        "laptop", language=settings.default_language, market="il",
     )
 
 
@@ -97,7 +98,7 @@ async def test_search_auto_detects_market(client: AsyncClient):
     assert response.status_code == 200
     mock_detect.assert_called_once()
     instance.process_query.assert_awaited_once_with(
-        "laptop", language="en", market="il",
+        "laptop", language=settings.default_language, market="il",
     )
 
 

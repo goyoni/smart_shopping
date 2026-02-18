@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.shared.config import settings
 from src.shared.geo import detect_market, get_client_ip
 
 
@@ -36,7 +37,7 @@ class TestDetectMarket:
         with patch.dict("sys.modules", {"geoip2": mock_geoip2, "geoip2.database": mock_geoip2.database}):
             result = detect_market("1.2.3.4")
 
-        assert result == "us"
+        assert result == settings.default_market
 
     def test_falls_back_when_geoip2_not_installed(self):
         with patch.dict("sys.modules", {"geoip2": None}):
@@ -44,7 +45,7 @@ class TestDetectMarket:
             with patch("builtins.__import__", side_effect=ImportError):
                 result = detect_market("1.2.3.4")
 
-        assert result == "us"
+        assert result == settings.default_market
 
     def test_falls_back_on_lookup_error(self):
         mock_reader_instance = MagicMock()
@@ -58,7 +59,7 @@ class TestDetectMarket:
         with patch.dict("sys.modules", {"geoip2": mock_geoip2, "geoip2.database": mock_geoip2.database}):
             result = detect_market("bad-ip")
 
-        assert result == "us"
+        assert result == settings.default_market
 
 
 class TestGetClientIp:
