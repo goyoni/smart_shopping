@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import asdict, dataclass
 
 from playwright.async_api import Page
 
-logger = logging.getLogger(__name__)
+from src.shared.logging import get_logger
+
+logger = get_logger(__name__)
 
 # CSS selector candidates tried in order for product containers
 _CONTAINER_CANDIDATES: list[str] = [

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import logging
 import re
 from urllib.parse import urljoin, urlparse
 
@@ -16,9 +15,10 @@ from src.mcp_servers.web_scraper_mcp.db_cache import (
 )
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy, discover_strategy
 from src.shared.browser import get_page
+from src.shared.logging import get_logger
 from src.shared.models import ProductResult, Seller
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _MAX_PRODUCTS_PER_SITE = 50
 

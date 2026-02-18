@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -11,8 +10,9 @@ from sqlalchemy import select
 from src.backend.db.engine import async_session
 from src.backend.db.models import ScrapingInstruction
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
+from src.shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _CACHE_TTL_DAYS = 30
 _MIN_SUCCESS_RATE = 0.5

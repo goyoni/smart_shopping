@@ -12,6 +12,7 @@ from src.backend.db.engine import async_session
 from src.backend.db.models import SearchHistory
 from src.backend.websocket.handler import send_status
 from src.shared.geo import detect_market, get_client_ip
+from src.shared.logging import set_session_id
 from src.shared.models import SearchRequest, SearchResponse
 
 router = APIRouter()
@@ -25,6 +26,7 @@ async def health_check() -> dict[str, str]:
 @router.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest, raw_request: Request) -> SearchResponse:
     session_id = request.session_id or uuid.uuid4().hex
+    set_session_id(session_id)
 
     # Auto-detect market from client IP if not provided
     market = request.market

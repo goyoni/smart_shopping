@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-logger = logging.getLogger(__name__)
+from src.shared.logging import get_logger
+
+logger = get_logger(__name__)
 
 _KNOWN_ECOMMERCE_DOMAINS: set[str] = {
     # Global

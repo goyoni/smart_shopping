@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import logging
-
 from src.shared.config import settings
+from src.shared.logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _DEFAULT_MARKET = "us"
 
