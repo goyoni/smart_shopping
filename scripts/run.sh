@@ -38,7 +38,7 @@ if [ "$SKIP_SETUP" = false ]; then
     pip install --upgrade pip setuptools --quiet
 
     echo "Installing Python dependencies..."
-    pip install -e ".[dev]" --quiet
+    pip install -e ".[dev,dashboard]" --quiet
 
     echo "Installing Playwright browsers..."
     playwright install chromium --with-deps 2>/dev/null || playwright install chromium
