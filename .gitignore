@@ -52,3 +52,6 @@ evals/results/*.json
 *.pem
 *.key
 credentials.json
+
+# Phoenix trace storage
+data/phoenix/

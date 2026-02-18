@@ -13,12 +13,15 @@ from fastapi.staticfiles import StaticFiles
 from src.backend.api.routes import router
 from src.backend.db.engine import init_db
 from src.backend.websocket.handler import websocket_router
+from src.shared.logging import setup_logging, shutdown_tracing
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    setup_logging()
     await init_db()
     yield
+    shutdown_tracing()
 
 
 app = FastAPI(

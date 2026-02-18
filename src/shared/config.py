@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     log_format: str = "console"
     playwright_headless: bool = True
     geoip_db_path: str = "data/GeoLite2-Country.mmdb"
+    otel_exporter_endpoint: str = ""
+    phoenix_enabled: bool = True
+    phoenix_port: int = 6006
 
     model_config = {"env_file": "config/.env.local", "extra": "ignore"}
 
