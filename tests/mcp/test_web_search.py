@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.mcp_servers.web_search_mcp.search import (
     SearchResult,
-    _is_captcha_page,
+    _extract_ddg_url,
     build_search_url,
     extract_search_results,
     search_products,
@@ -18,22 +19,20 @@ from src.mcp_servers.web_search_mcp.search import (
 class TestBuildSearchUrl:
     def test_default_english_us(self):
         url = build_search_url("wireless headphones")
-        assert "google.com" in url
-        assert "hl=en" in url
+        assert "duckduckgo.com" in url
+        assert "kl=us-en" in url
         assert "buy+online" in url or "buy%20online" in url.lower()
 
     def test_hebrew_israel(self):
         url = build_search_url("אוזניות", language="he", market="il")
-        assert "google.co.il" in url
-        assert "hl=iw" in url
+        assert "kl=il-he" in url
 
-    def test_unknown_market_defaults_to_google_com(self):
+    def test_unknown_market_defaults_to_us(self):
         url = build_search_url("laptop", market="zz")
-        assert "google.com" in url
+        assert "kl=us-en" in url
 
     def test_query_augmentation_english(self):
         url = build_search_url("microwave")
-        # The query should include "buy online"
         assert "buy" in url.lower()
 
     def test_query_augmentation_hebrew(self):
@@ -41,132 +40,141 @@ class TestBuildSearchUrl:
         assert "%D7%A7%D7%A0%D7%99%D7%99%D7%94" in url  # "קנייה" URL-encoded
 
 
+class TestExtractDdgUrl:
+    def test_extracts_from_uddg_redirect(self):
+        raw = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.amazon.com%2Fproduct&rut=abc"
+        assert _extract_ddg_url(raw) == "https://www.amazon.com/product"
+
+    def test_handles_protocol_relative_url(self):
+        raw = "//example.com/page"
+        assert _extract_ddg_url(raw) == "https://example.com/page"
+
+    def test_passes_through_direct_url(self):
+        raw = "https://example.com/page"
+        assert _extract_ddg_url(raw) == "https://example.com/page"
+
+
 class TestExtractSearchResults:
-    @pytest.mark.asyncio
-    async def test_extracts_results_from_page(self):
-        # Mock a link element with title
-        mock_title_el = AsyncMock()
-        mock_title_el.inner_text.return_value = "Great Product"
-
-        mock_link = AsyncMock()
-        mock_link.get_attribute.return_value = "https://shop.example.com/product/123"
-        mock_link.query_selector.return_value = mock_title_el
-
-        mock_parent_handle = AsyncMock()
-        mock_parent_el = AsyncMock()
-        mock_parent_el.query_selector.return_value = None
-        mock_parent_handle.as_element.return_value = mock_parent_el
-        mock_link.evaluate_handle.return_value = mock_parent_handle
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_link]
-
-        results = await extract_search_results(mock_page)
-        assert len(results) == 1
-        assert results[0].url == "https://shop.example.com/product/123"
+    def test_extracts_results(self):
+        html = '''
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.amazon.com%2Fp%2F1">Great Product</a>
+        <a class="result__snippet" href="#">This is a product snippet with details</a>
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.bestbuy.com%2Fp%2F2">Another Product</a>
+        <a class="result__snippet" href="#">Another snippet here with info</a>
+        '''
+        results = extract_search_results(html)
+        assert len(results) == 2
+        assert results[0].url == "https://www.amazon.com/p/1"
         assert results[0].title == "Great Product"
+        assert "product snippet" in results[0].snippet
 
-    @pytest.mark.asyncio
-    async def test_skips_links_without_title(self):
-        mock_link = AsyncMock()
-        mock_link.get_attribute.return_value = "https://example.com"
-        mock_link.query_selector.return_value = None  # No h3 title
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_link]
-
-        results = await extract_search_results(mock_page)
+    def test_skips_empty_titles(self):
+        html = '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com"> </a>'
+        results = extract_search_results(html)
         assert len(results) == 0
 
-    @pytest.mark.asyncio
-    async def test_skips_google_internal_links(self):
-        mock_title = AsyncMock()
-        mock_title.inner_text.return_value = "More results"
+    def test_deduplicates_urls(self):
+        html = '''
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">A</a>
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">B</a>
+        '''
+        results = extract_search_results(html)
+        assert len(results) == 1
 
-        mock_link = AsyncMock()
-        mock_link.get_attribute.return_value = "https://www.google.com/search?q=test"
-        mock_link.query_selector.return_value = mock_title
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_link]
-
-        results = await extract_search_results(mock_page)
-        assert len(results) == 0
-
-
-class TestCaptchaDetection:
-    def test_detects_captcha_page(self):
-        assert _is_captcha_page("We detected unusual traffic from your network") is True
-
-    def test_detects_recaptcha(self):
-        assert _is_captcha_page('<div class="g-recaptcha"></div>') is True
-
-    def test_normal_page_not_captcha(self):
-        assert _is_captcha_page("<html><body>Search results here</body></html>") is False
+    def test_strips_html_from_title(self):
+        html = '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fex.com">Product <b>Bold</b> Title</a>'
+        results = extract_search_results(html)
+        assert len(results) == 1
+        assert results[0].title == "Product Bold Title"
 
 
 class TestSearchProducts:
     @pytest.mark.asyncio
     async def test_returns_results_on_success(self):
-        mock_title_el = AsyncMock()
-        mock_title_el.inner_text.return_value = "Product Title"
+        html = '''
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fshop.example.com%2Fp%2F1">Product Title</a>
+        <a class="result__snippet" href="#">A snippet about the product here</a>
+        '''
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.text = html
 
-        mock_link = AsyncMock()
-        mock_link.get_attribute.return_value = "https://shop.example.com/p/1"
-        mock_link.query_selector.return_value = mock_title_el
-        mock_parent_handle = AsyncMock()
-        mock_parent_el = AsyncMock()
-        mock_parent_el.query_selector.return_value = None
-        mock_parent_handle.as_element.return_value = mock_parent_el
-        mock_link.evaluate_handle.return_value = mock_parent_handle
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_link]
-        mock_page.content.return_value = "<html>normal page</html>"
-
-        mock_browser = AsyncMock()
-
-        with patch("src.mcp_servers.web_search_mcp.search.get_page") as mock_get_page:
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await search_products(mock_browser, "test product")
+        with patch("src.mcp_servers.web_search_mcp.search.httpx.AsyncClient", return_value=mock_client):
+            results = await search_products("test product")
 
         assert len(results) == 1
         assert results[0].title == "Product Title"
 
     @pytest.mark.asyncio
-    async def test_returns_empty_on_captcha(self):
-        mock_page = AsyncMock()
-        mock_page.content.return_value = "We detected unusual traffic from your network"
+    async def test_returns_empty_on_http_error(self):
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 429
+        mock_response.text = ""
 
-        mock_browser = AsyncMock()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("src.mcp_servers.web_search_mcp.search.get_page") as mock_get_page:
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await search_products(mock_browser, "test product")
+        with patch("src.mcp_servers.web_search_mcp.search.httpx.AsyncClient", return_value=mock_client):
+            results = await search_products("test product")
 
         assert results == []
 
     @pytest.mark.asyncio
-    async def test_returns_empty_on_timeout(self):
-        mock_page = AsyncMock()
-        mock_page.goto.side_effect = TimeoutError("Navigation timeout")
+    async def test_retries_on_network_error(self):
+        html = '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fshop.example.com%2Fp%2F1">Retry Product</a>'
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.text = html
 
-        mock_browser = AsyncMock()
+        mock_client_fail = AsyncMock(spec=httpx.AsyncClient)
+        mock_client_fail.get.side_effect = httpx.ConnectError("connection failed")
+        mock_client_fail.__aenter__ = AsyncMock(return_value=mock_client_fail)
+        mock_client_fail.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("src.mcp_servers.web_search_mcp.search.get_page") as mock_get_page:
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
+        mock_client_ok = AsyncMock(spec=httpx.AsyncClient)
+        mock_client_ok.get.return_value = mock_response
+        mock_client_ok.__aenter__ = AsyncMock(return_value=mock_client_ok)
+        mock_client_ok.__aexit__ = AsyncMock(return_value=False)
 
-            results = await search_products(mock_browser, "test product")
+        with patch(
+            "src.mcp_servers.web_search_mcp.search.httpx.AsyncClient",
+            side_effect=[mock_client_fail, mock_client_ok],
+        ):
+            results = await search_products("test product")
+
+        assert len(results) == 1
+        assert results[0].title == "Retry Product"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_after_all_retries_fail(self):
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get.side_effect = httpx.ConnectError("connection failed")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.mcp_servers.web_search_mcp.search.httpx.AsyncClient", return_value=mock_client):
+            results = await search_products("test product")
 
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_sets_http_status_on_span(self):
+        html = '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fex.com">P</a>'
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.text = html
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get.return_value = mock_response
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.mcp_servers.web_search_mcp.search.httpx.AsyncClient", return_value=mock_client):
+            await search_products("test")

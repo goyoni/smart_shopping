@@ -60,17 +60,7 @@ async def test_main_agent_successful_pipeline():
 
 @pytest.mark.asyncio
 async def test_main_agent_no_search_results():
-    mock_browser = AsyncMock()
-
-    with (
-        patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=[]),
-    ):
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_get_browser.return_value = mock_ctx
-
+    with patch("src.agents.main_agent.search_products", return_value=[]):
         agent = MainAgent(session_id="test-empty")
         state = await agent.process_query("nonexistent product xyz")
 
@@ -81,23 +71,13 @@ async def test_main_agent_no_search_results():
 
 @pytest.mark.asyncio
 async def test_main_agent_no_ecommerce_sites():
-    mock_browser = AsyncMock()
-
     # Return results but none are e-commerce
     mock_search_results = [
         SearchResult(url="https://www.youtube.com/watch?v=1", title="Review", snippet=""),
         SearchResult(url="https://www.reddit.com/r/gadgets", title="Discussion", snippet=""),
     ]
 
-    with (
-        patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
-    ):
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_get_browser.return_value = mock_ctx
-
+    with patch("src.agents.main_agent.search_products", return_value=mock_search_results):
         agent = MainAgent(session_id="test-no-ecom")
         state = await agent.process_query("product review video")
 
@@ -108,7 +88,14 @@ async def test_main_agent_no_ecommerce_sites():
 
 @pytest.mark.asyncio
 async def test_main_agent_browser_error():
-    with patch("src.agents.main_agent.get_browser") as mock_get_browser:
+    mock_search_results = [
+        SearchResult(url="https://www.amazon.com/dp/B1", title="Product A", snippet=""),
+    ]
+
+    with (
+        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+    ):
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(side_effect=RuntimeError("Browser launch failed"))
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
@@ -169,17 +156,7 @@ async def test_main_agent_status_callback():
     async def callback(session_id: str, message: str) -> None:
         received.append((session_id, message))
 
-    mock_browser = AsyncMock()
-
-    with (
-        patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=[]),
-    ):
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_get_browser.return_value = mock_ctx
-
+    with patch("src.agents.main_agent.search_products", return_value=[]):
         agent = MainAgent(session_id="cb-test", status_callback=callback)
         await agent.process_query("test query")
 
@@ -190,17 +167,7 @@ async def test_main_agent_status_callback():
 
 @pytest.mark.asyncio
 async def test_main_agent_refine_search():
-    mock_browser = AsyncMock()
-
-    with (
-        patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=[]),
-    ):
-        mock_ctx = AsyncMock()
-        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
-        mock_ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_get_browser.return_value = mock_ctx
-
+    with patch("src.agents.main_agent.search_products", return_value=[]):
         agent = MainAgent(session_id="test-123")
         await agent.process_query("refrigerator")
 

@@ -42,7 +42,7 @@ async def test_get_browser_launches_headless():
 
         call_kwargs = mock_pw.chromium.launch.call_args
         assert call_kwargs.kwargs["headless"] is True
-        assert "--disable-blink-features=AutomationControlled" in call_kwargs.kwargs["args"]
+        assert "--no-sandbox" in call_kwargs.kwargs["args"]
 
 
 @pytest.mark.asyncio
@@ -63,7 +63,7 @@ async def test_get_page_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_get_page_sets_user_agent():
+async def test_get_page_uses_default_user_agent():
     mock_page = AsyncMock()
     mock_context = AsyncMock()
     mock_context.new_page.return_value = mock_page
@@ -74,6 +74,7 @@ async def test_get_page_sets_user_agent():
         pass
 
     call_kwargs = mock_browser.new_context.call_args.kwargs
-    assert "user_agent" in call_kwargs
+    # No custom user_agent — Playwright's default matches bundled Chromium
+    assert "user_agent" not in call_kwargs
     assert call_kwargs["locale"] == "he-IL"
     assert call_kwargs["viewport"] == {"width": 1920, "height": 1080}
