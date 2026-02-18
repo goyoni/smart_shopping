@@ -1,41 +1,44 @@
-"""Google search via Playwright for product discovery."""
+"""Web search via DuckDuckGo HTML for product discovery."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 
-from playwright.async_api import Browser, Page
-
+import httpx
 from opentelemetry import trace
 
-from src.shared.browser import get_page
 from src.shared.logging import get_logger, get_tracer
 
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
 
-_GOOGLE_DOMAINS: dict[str, str] = {
-    "il": "google.co.il",
-    "uk": "google.co.uk",
-    "de": "google.de",
-    "fr": "google.fr",
-    "us": "google.com",
-}
-
-_LANG_CODES: dict[str, str] = {
-    "he": "iw",  # Google uses 'iw' for Hebrew
-    "en": "en",
-    "ar": "ar",
-    "de": "de",
-    "fr": "fr",
-}
+_SEARCH_URL = "https://html.duckduckgo.com/html/"
 
 _BUY_ONLINE_SUFFIXES: dict[str, str] = {
     "he": "קנייה אונליין",
     "ar": "شراء عبر الإنترنت",
     "en": "buy online",
 }
+
+_REGION_CODES: dict[str, str] = {
+    "il": "il-he",
+    "uk": "uk-en",
+    "de": "de-de",
+    "fr": "fr-fr",
+    "us": "us-en",
+}
+
+_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+_REQUEST_TIMEOUT = 20.0
 
 
 @dataclass
@@ -46,114 +49,134 @@ class SearchResult:
 
 
 def build_search_url(query: str, language: str = "en", market: str = "us") -> str:
-    """Build Google search URL with market-specific domain and language params.
+    """Build the augmented search query URL.
 
     Augments query with 'buy online' in the appropriate language to bias
-    toward shopping results.
+    toward shopping results.  Returns the DuckDuckGo HTML endpoint URL.
     """
-    domain = _GOOGLE_DOMAINS.get(market, "google.com")
-    hl = _LANG_CODES.get(language, language)
     suffix = _BUY_ONLINE_SUFFIXES.get(language, "buy online")
     augmented_query = f"{query} {suffix}"
     encoded = quote_plus(augmented_query)
-    return f"https://www.{domain}/search?q={encoded}&hl={hl}"
+    kl = _REGION_CODES.get(market, "us-en")
+    return f"{_SEARCH_URL}?q={encoded}&kl={kl}"
 
 
-async def extract_search_results(page: Page) -> list[SearchResult]:
-    """Extract URLs, titles, and snippets from a loaded Google results page."""
+def _extract_ddg_url(raw_url: str) -> str:
+    """Extract the actual destination URL from a DuckDuckGo redirect link.
+
+    DDG wraps results in ``//duckduckgo.com/l/?uddg=<encoded_url>&…``.
+    """
+    if "uddg=" in raw_url:
+        match = re.search(r"uddg=([^&]+)", raw_url)
+        if match:
+            return unquote(match.group(1))
+    # Direct URL (no redirect wrapper)
+    if raw_url.startswith("//"):
+        return "https:" + raw_url
+    return raw_url
+
+
+def extract_search_results(html: str) -> list[SearchResult]:
+    """Extract URLs, titles, and snippets from DuckDuckGo HTML search results."""
     results: list[SearchResult] = []
+    seen_urls: set[str] = set()
 
-    # Use generic selectors for Google search result links
-    links = await page.query_selector_all("div#search a[href^='http']")
+    # DuckDuckGo uses <a class="result__a" href="...">TITLE</a>
+    link_pattern = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL | re.IGNORECASE,
+    )
 
-    for link in links:
-        href = await link.get_attribute("href")
-        if not href:
+    # Snippets are in <a class="result__snippet" ...>TEXT</a>
+    snippet_pattern = re.compile(
+        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    link_matches = link_pattern.findall(html)
+    snippet_matches = snippet_pattern.findall(html)
+
+    for i, (raw_url, raw_title) in enumerate(link_matches):
+        url = _extract_ddg_url(raw_url)
+        title = re.sub(r"<[^>]+>", "", raw_title).strip()
+        if not title or not url:
             continue
 
-        # Skip Google internal links
-        if "google." in href and "/search?" in href:
+        # Skip DuckDuckGo-internal links
+        if "duckduckgo.com" in url and "/l/?" not in raw_url:
             continue
 
-        # Try to find title within or near the link
-        title_el = await link.query_selector("h3")
-        title = await title_el.inner_text() if title_el else ""
-
-        # Skip links without titles (usually not main results)
-        if not title:
+        if url in seen_urls:
             continue
+        seen_urls.add(url)
 
-        # Try to find snippet from parent container
         snippet = ""
-        parent = await link.evaluate_handle("el => el.closest('div[data-sokoban-container]') || el.parentElement?.parentElement")
-        if parent:
-            try:
-                snippet_el = await parent.as_element().query_selector("div[data-sncf], span[style*='-webkit-line-clamp']")
-                if snippet_el:
-                    snippet = await snippet_el.inner_text()
-            except Exception:
-                pass
+        if i < len(snippet_matches):
+            snippet = re.sub(r"<[^>]+>", "", snippet_matches[i]).strip()
 
-        results.append(SearchResult(url=href, title=title, snippet=snippet))
+        results.append(SearchResult(url=url, title=title, snippet=snippet))
 
     return results
 
 
-def _is_captcha_page(page_content: str) -> bool:
-    """Check if the page content indicates a CAPTCHA challenge."""
-    captcha_signals = [
-        "unusual traffic",
-        "not a robot",
-        "captcha",
-        "recaptcha",
-        "/sorry/",
-    ]
-    content_lower = page_content.lower()
-    return any(signal in content_lower for signal in captcha_signals)
-
-
 async def search_products(
-    browser: Browser,
     query: str,
     language: str = "en",
     market: str = "us",
+    *,
+    _max_attempts: int = 2,
 ) -> list[SearchResult]:
-    """Search Google for products and return results.
+    """Search for products and return results.
 
-    Orchestrates: navigate → wait for results → check for CAPTCHA → extract.
-    Returns empty list on CAPTCHA or timeout.
+    Uses DuckDuckGo's HTML endpoint which returns server-rendered HTML
+    (no JavaScript required).  Retries once on transient failures.
+    Returns empty list on HTTP errors or network issues.
     """
     url = build_search_url(query, language, market)
-    locale_map = {"he": "he-IL", "ar": "ar-SA", "en": "en-US"}
-    locale = locale_map.get(language, "en-US")
     span = trace.get_current_span()
     span.set_attribute("search_url", url)
 
-    async with get_page(browser, locale=locale) as page:
+    logger.info("Starting search for '%s' (language=%s, market=%s)", query, language, market)
+    span.add_event("search_started", {"query": query, "language": language, "market": market, "url": url})
+
+    for attempt in range(1, _max_attempts + 1):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            async with httpx.AsyncClient(
+                timeout=_REQUEST_TIMEOUT,
+                follow_redirects=True,
+                headers=_REQUEST_HEADERS,
+            ) as client:
+                response = await client.get(url)
         except Exception:
-            logger.warning("Timeout navigating to Google search for '%s'", query)
-            span.set_attribute("exit_reason", "navigation_timeout")
-            return []
+            logger.warning(
+                "HTTP request failed for '%s' (attempt %d/%d)",
+                query, attempt, _max_attempts,
+            )
+            if attempt == _max_attempts:
+                span.set_attribute("exit_reason", "request_failed")
+                return []
+            continue
 
-        # Wait for search results to appear
-        try:
-            await page.wait_for_selector("div#search", timeout=10000)
-        except Exception:
-            logger.warning("Search results did not load for '%s'", query)
-            span.set_attribute("exit_reason", "results_selector_timeout")
-            return []
+        span.set_attribute("http_status", response.status_code)
 
-        # Check for CAPTCHA
-        content = await page.content()
-        if _is_captcha_page(content):
-            logger.warning("CAPTCHA detected for query '%s'", query)
-            span.set_attribute("exit_reason", "captcha")
-            return []
+        if response.status_code != 200:
+            logger.warning(
+                "Search returned HTTP %d for '%s' (attempt %d/%d)",
+                response.status_code, query, attempt, _max_attempts,
+            )
+            if attempt == _max_attempts:
+                span.set_attribute("exit_reason", f"http_{response.status_code}")
+                return []
+            continue
 
-        results = await extract_search_results(page)
+        html = response.text
+        results = extract_search_results(html)
         if not results:
             span.set_attribute("exit_reason", "no_results_extracted")
-        logger.info("Found %d search results for '%s'", len(results), query)
+            logger.warning("No results extracted from HTML for '%s'", query)
+            logger.warning("Response content (first 500 chars): %s", html[:500])
+        else:
+            logger.info("Found %d search results for '%s'", len(results), query)
         return results
+
+    return []

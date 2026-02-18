@@ -9,7 +9,6 @@ from mcp.types import TextContent, Tool
 
 from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
 from src.mcp_servers.web_search_mcp.search import search_products
-from src.shared.browser import get_browser
 
 server = Server("web-search")
 
@@ -54,8 +53,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         query = arguments["query"]
         language = arguments.get("language", "en")
         market = arguments.get("market", "us")
-        async with get_browser() as browser:
-            results = await search_products(browser, query, language, market)
+        results = await search_products(query, language, market)
         urls_data = [
             {"url": r.url, "title": r.title, "snippet": r.snippet}
             for r in results
