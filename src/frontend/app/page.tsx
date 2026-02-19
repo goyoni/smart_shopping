@@ -2,16 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusWebSocket } from "../lib/websocket";
-
-interface ProductResult {
-  name: string;
-  model?: string;
-}
+import ProductCard, { type ProductResultData } from "../components/ProductCard";
 
 export default function Home() {
   const [query, setQuery] = useState("");
   const [statusMessages, setStatusMessages] = useState<string[]>([]);
-  const [results, setResults] = useState<ProductResult[]>([]);
+  const [results, setResults] = useState<ProductResultData[]>([]);
   const [loading, setLoading] = useState(false);
 
   const sessionIdRef = useRef(crypto.randomUUID().replace(/-/g, ""));
@@ -59,8 +55,23 @@ export default function Home() {
     }
   }, [query, loading]);
 
+  // Count distinct source domains
+  const sourceDomains = new Set<string>();
+  for (const r of results) {
+    for (const s of r.sellers || []) {
+      if (s.url) {
+        try {
+          const h = new URL(s.url).hostname.replace(/^www\./, "");
+          if (h) sourceDomains.add(h);
+        } catch { /* ignore */ }
+      } else if (s.name) {
+        sourceDomains.add(s.name);
+      }
+    }
+  }
+
   return (
-    <main style={{ maxWidth: 800, margin: "0 auto", padding: "2rem" }}>
+    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1>Smart Shopping Agent</h1>
       <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
         <input
@@ -93,27 +104,22 @@ export default function Home() {
 
       {results.length > 0 && (
         <div style={{ marginTop: "1.5rem" }}>
-          <h2>Results</h2>
-          <ul style={{ listStyle: "none", padding: 0 }}>
+          <h2 style={{ marginBottom: "0.75rem" }}>
+            Found {results.length} product{results.length !== 1 ? "s" : ""} from{" "}
+            {sourceDomains.size} site{sourceDomains.size !== 1 ? "s" : ""}
+          </h2>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+              gap: "1rem",
+            }}
+          >
             {results.map((r, i) => (
-              <li
-                key={i}
-                style={{
-                  padding: "0.75rem",
-                  border: "1px solid #ddd",
-                  borderRadius: 4,
-                  marginBottom: "0.5rem",
-                }}
-              >
-                <strong>{r.name}</strong>
-                {r.model && (
-                  <span style={{ color: "#888", marginInlineStart: "0.5rem" }}>
-                    ({r.model})
-                  </span>
-                )}
-              </li>
+              <ProductCard key={i} product={r} />
             ))}
-          </ul>
+          </div>
         </div>
       )}
     </main>
