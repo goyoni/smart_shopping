@@ -67,6 +67,8 @@ async def scrape_page(
     browser: Browser,
     url: str,
     product_query: str = "",
+    *,
+    locale: str = "en-US",
 ) -> list[ProductResult]:
     """Scrape a product listing page using cached or newly discovered strategy.
 
@@ -77,7 +79,6 @@ async def scrape_page(
     5. Extract products
     """
     domain = extract_domain(url)
-    locale = "en-US"
 
     async with get_page(browser, locale=locale) as page:
         try:
