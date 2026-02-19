@@ -19,36 +19,49 @@ _CONTAINER_CANDIDATES: list[str] = [
     ".product-item",
     ".product-tile",
     ".product-listing",
+    ".product-box",
     ".search-result",
     ".s-result-item",
     ".product",
     "li[class*='product']",
     "div[class*='product']",
     "article[class*='product']",
+    "div[class*='Product']",
+    "div[class*='item']",
+    "div[class*='Item']",
 ]
 
 _NAME_CANDIDATES: list[str] = [
     "h2 a", "h3 a", "h2", "h3",
     "[class*='title'] a", "[class*='name'] a",
+    "[class*='Title'] a", "[class*='Name'] a",
     "[class*='title']", "[class*='name']",
+    "[class*='Title']", "[class*='Name']",
     "a[class*='product']",
+    "a[class*='Product']",
+    "a[class*='Model']",
 ]
 
 _PRICE_CANDIDATES: list[str] = [
     "[class*='price']",
+    "[class*='Price']",
     "[data-price]",
+    "[data-min-price]",
     "span[class*='amount']",
     "[class*='cost']",
+    "[class*='Cost']",
 ]
 
 _IMAGE_CANDIDATES: list[str] = [
     "img[src*='product']", "img[data-src]",
-    "img[class*='product']", "img",
+    "img[class*='product']", "img[class*='Product']",
+    "img[loading]", "img",
 ]
 
 _URL_CANDIDATES: list[str] = [
     "a[href*='/product']", "a[href*='/dp/']",
     "a[href*='/item']", "a[href*='/p/']",
+    "a[href*='/model']", "a[href*='pid=']",
     "a[href]",
 ]
 
