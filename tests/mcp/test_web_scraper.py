@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.mcp_servers.web_scraper_mcp.scraper import extract_domain, parse_price, scrape_page
+from src.mcp_servers.web_scraper_mcp.scraper import (
+    extract_domain,
+    extract_specs_from_text,
+    parse_price,
+    scrape_page,
+)
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 
 
@@ -92,6 +97,7 @@ class TestScrapePageWithCachedStrategy:
             return None
 
         mock_container.query_selector = mock_query_selector
+        mock_container.inner_text = AsyncMock(return_value="Test Laptop $999.99")
 
         mock_page = AsyncMock()
         mock_page.query_selector_all.return_value = [mock_container]
@@ -140,6 +146,7 @@ class TestScrapePageCachedStrategyFailure:
             return None
 
         mock_container.query_selector = mock_qs
+        mock_container.inner_text = AsyncMock(return_value="New Product")
 
         mock_page = AsyncMock()
 
@@ -178,3 +185,54 @@ class TestScrapePageCachedStrategyFailure:
         mock_update.assert_awaited_with("shop.example.com", success=False)
         # New strategy should be saved
         mock_save.assert_awaited_once()
+
+
+class TestExtractSpecsFromText:
+    def test_extracts_noise_level(self):
+        specs = extract_specs_from_text("Samsung Refrigerator 39 dB noise")
+        assert specs["noise_level"] == "39 dB"
+
+    def test_extracts_capacity(self):
+        specs = extract_specs_from_text("350 liters capacity")
+        assert specs["capacity"] == "350 liters"
+
+    def test_extracts_capacity_L(self):
+        specs = extract_specs_from_text("Fridge 400L")
+        assert specs["capacity"] == "400L"
+
+    def test_extracts_energy_rating(self):
+        specs = extract_specs_from_text("A+ Energy class")
+        assert specs["energy_rating"] == "A+"
+
+    def test_extracts_resolution(self):
+        specs = extract_specs_from_text('Samsung 55" 4K Smart TV')
+        assert specs["resolution"] == "4K"
+        assert specs["screen_size"] == '55"'
+
+    def test_extracts_processor(self):
+        specs = extract_specs_from_text("Laptop i7-13700H 16GB RAM 512GB SSD")
+        assert specs["processor"] == "i7-13700H"
+        assert specs["ram"] == "16GB RAM"
+        assert specs["storage"] == "512GB SSD"
+
+    def test_extracts_anc(self):
+        specs = extract_specs_from_text("Sony WH-1000XM5 ANC Headphones")
+        assert specs["noise_cancelling"] == "ANC"
+
+    def test_extracts_weight(self):
+        specs = extract_specs_from_text("Weight: 55 kg")
+        assert specs["weight"] == "55 kg"
+
+    def test_empty_text(self):
+        assert extract_specs_from_text("") == {}
+
+    def test_no_specs(self):
+        assert extract_specs_from_text("A great product for your home") == {}
+
+    def test_multiple_specs(self):
+        text = "LG Refrigerator 350L 39 dB A+ Energy Frost-Free"
+        specs = extract_specs_from_text(text)
+        assert "capacity" in specs
+        assert "noise_level" in specs
+        assert "energy_rating" in specs
+        assert "frost_free" in specs
