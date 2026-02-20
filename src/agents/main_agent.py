@@ -264,7 +264,9 @@ class MainAgent:
                                 try:
                                     await self._add_status(f"Scraping {signal.domain}...")
                                     products = await scrape_page(
-                                        browser, signal.url, query, locale=locale,
+                                        browser, signal.url, query,
+                                        locale=locale,
+                                        criteria=criteria if criteria else None,
                                     )
                                     # Tag products with category
                                     if category:
