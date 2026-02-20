@@ -387,11 +387,27 @@ Each agent works in separate branch tagged with name.
 - Frontend displays 10+ results from multiple sites
 - Cache scraping instructions
 
+#### Phase 3.1:
+##### UI Improvements
+- Results are links leading to product pages
+- Seller name / url is a link leading to seller website
+- Product images are shown instead of placeholders
+- Criteria used are shown for each product
+- Add client identifier per request to track usage and retrieve history
+- Add a search session_id to track user's search history, and change url params to include it
+- Search history with status indicators
+
+##### Backend Improvements
+- Extend Scraper MCP to recieve list of Criteria to extact, and cache them per site
+- Persist all traces to allow debugging and view in Pheonix after server restart
+- Persist all results to allow view in user history after server restart
+
+
+
 ### Phase 4: Refinement & Learning
 - Handle pagination for multi-page results
 - Re-learning when scraping fails
 - Success rate tracking per domain
-- Search history with status indicators
 - Shopping list (add/remove)
 - Manual "Contact Seller" buttons
 
