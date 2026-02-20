@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from playwright.async_api import Page
 
@@ -79,6 +79,7 @@ class ScrapingStrategy:
     currency_hint: str = ""
     version: int = 1
     discovery_method: str = "css_candidates"
+    criteria_selectors: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -88,6 +89,65 @@ class ScrapingStrategy:
         parsed = json.loads(data)
         valid_fields = {k: v for k, v in parsed.items() if k in cls.__dataclass_fields__}
         return cls(**valid_fields)
+
+
+_SPEC_CONTAINER_CANDIDATES: list[str] = [
+    "[class*='spec']",
+    "[class*='Spec']",
+    "[class*='attribute']",
+    "[class*='Attribute']",
+    "[class*='feature']",
+    "[class*='Feature']",
+    "[data-spec]",
+    "[data-attribute]",
+    "dl",
+    "table[class*='spec']",
+]
+
+
+def _criterion_css_candidates(key: str) -> list[str]:
+    """Generate CSS probe selectors for a specific criterion key."""
+    short = key.split("_")[0]
+    return [
+        f"[class*='{key}']",
+        f"[class*='{short}']",
+        f"[data-spec='{key}']",
+        f"[data-attribute='{key}']",
+    ]
+
+
+async def _discover_criteria_selectors(
+    container: object,
+    criteria: dict[str, dict] | None,
+) -> dict[str, str]:
+    """Probe a product container for per-criterion CSS selectors.
+
+    Returns a dict mapping criterion keys to discovered CSS selectors.
+    Only returns selectors that resolve to an element with short,
+    non-empty text content.
+    """
+    if not criteria:
+        return {}
+
+    discovered: dict[str, str] = {}
+
+    for key in criteria:
+        if key == "price":
+            continue
+
+        candidates = _criterion_css_candidates(key)
+        for selector in candidates:
+            try:
+                el = await container.query_selector(selector)
+                if el:
+                    text = (await el.inner_text()).strip()
+                    if text and len(text) < 200:
+                        discovered[key] = selector
+                        break
+            except Exception:
+                continue
+
+    return discovered
 
 
 def _looks_like_price(text: str) -> bool:
@@ -129,7 +189,11 @@ async def _find_selector(container, candidates: list[str]) -> str:
     return ""
 
 
-async def discover_strategy(page: Page, product_query: str = "") -> ScrapingStrategy | None:
+async def discover_strategy(
+    page: Page,
+    product_query: str = "",
+    criteria: dict[str, dict] | None = None,
+) -> ScrapingStrategy | None:
     """Discover scraping strategy by trying CSS selector candidates.
 
     Requires at least 2 matching containers to consider a strategy valid.
@@ -172,6 +236,9 @@ async def discover_strategy(page: Page, product_query: str = "") -> ScrapingStra
             except Exception:
                 pass
 
+        # Discover per-criterion CSS selectors
+        criteria_sels = await _discover_criteria_selectors(first, criteria)
+
         return ScrapingStrategy(
             product_container=container_selector,
             name_selector=name_sel,
@@ -180,6 +247,7 @@ async def discover_strategy(page: Page, product_query: str = "") -> ScrapingStra
             url_selector=url_sel,
             currency_hint=currency_hint,
             discovery_method="css_candidates",
+            criteria_selectors=criteria_sels,
         )
 
     # Fallback: price-pattern based discovery
