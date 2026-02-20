@@ -4,29 +4,37 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StatusWebSocket } from "../lib/websocket";
 import ProductCard, { type ProductResultData } from "../components/ProductCard";
 
+function getInitialSessionId(): string {
+  if (typeof window !== "undefined") {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("session_id");
+    if (fromUrl) return fromUrl;
+  }
+  return crypto.randomUUID().replace(/-/g, "");
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [statusMessages, setStatusMessages] = useState<string[]>([]);
   const [results, setResults] = useState<ProductResultData[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const sessionIdRef = useRef(crypto.randomUUID().replace(/-/g, ""));
+  const sessionIdRef = useRef(getInitialSessionId());
   const wsRef = useRef<StatusWebSocket | null>(null);
+  const didRestoreRef = useRef(false);
 
-  useEffect(() => {
-    return () => {
-      wsRef.current?.disconnect();
-    };
-  }, []);
-
-  const handleSearch = useCallback(async () => {
-    if (!query.trim() || loading) return;
+  const runSearch = useCallback(async (searchQuery: string) => {
+    if (!searchQuery.trim()) return;
 
     setLoading(true);
     setStatusMessages([]);
     setResults([]);
 
     const sessionId = sessionIdRef.current;
+
+    // Update URL with search params
+    const params = new URLSearchParams({ q: searchQuery, session_id: sessionId });
+    window.history.pushState({}, "", `?${params.toString()}`);
 
     // Connect WebSocket before sending search request
     wsRef.current?.disconnect();
@@ -42,7 +50,7 @@ export default function Home() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, session_id: sessionId }),
+          body: JSON.stringify({ query: searchQuery, session_id: sessionId }),
         }
       );
       const data = await res.json();
@@ -53,7 +61,31 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [query, loading]);
+  }, []);
+
+  const handleSearch = useCallback(async () => {
+    if (!query.trim() || loading) return;
+    await runSearch(query);
+  }, [query, loading, runSearch]);
+
+  // Restore search from URL params on mount
+  useEffect(() => {
+    if (didRestoreRef.current) return;
+    didRestoreRef.current = true;
+
+    const params = new URLSearchParams(window.location.search);
+    const urlQuery = params.get("q");
+    if (urlQuery) {
+      setQuery(urlQuery);
+      runSearch(urlQuery);
+    }
+  }, [runSearch]);
+
+  useEffect(() => {
+    return () => {
+      wsRef.current?.disconnect();
+    };
+  }, []);
 
   // Count distinct source domains
   const sourceDomains = new Set<string>();
