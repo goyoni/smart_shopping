@@ -22,6 +22,52 @@ logger = get_logger(__name__)
 
 _MAX_PRODUCTS_PER_SITE = 50
 
+# Regex patterns that extract criteria *values* from product listing text.
+# Each tuple is (compiled_pattern, criteria_key, group_index_for_value).
+_SPEC_PATTERNS: list[tuple[re.Pattern, str, int]] = [
+    (re.compile(r"(\d+)\s*db\b", re.IGNORECASE), "noise_level", 0),
+    (re.compile(r"(\d+)\s*(?:liters?|litres?|L)\b"), "capacity", 0),
+    (re.compile(r"(\d+)\s*kg\b", re.IGNORECASE), "weight", 0),
+    (re.compile(r"(\d+)\s*W\b"), "power", 0),
+    (re.compile(r"(\d[\d,]*)\s*BTU\b", re.IGNORECASE), "cooling_capacity", 0),
+    (re.compile(r"(\d+)\s*RPM\b", re.IGNORECASE), "spin_speed", 0),
+    (re.compile(r'(\d{2,3})\s*["\u2033]\s*|(\d{2,3})\s*inch', re.IGNORECASE), "screen_size", 0),
+    (re.compile(r"\b(4K|8K|UHD|Full\s*HD|FHD|QHD|1080p|2160p)\b", re.IGNORECASE), "resolution", 0),
+    (re.compile(r"\b(OLED|QLED|Mini.?LED|Neo\s*QLED|LED|IPS|VA|TN)\b", re.IGNORECASE), "panel_type", 0),
+    (re.compile(r"(\d+)\s*Hz\b", re.IGNORECASE), "refresh_rate", 0),
+    (re.compile(r"\b(A\+{0,3}|[A-G])\s*energy\b", re.IGNORECASE), "energy_rating", 1),
+    (re.compile(r"energy\s*(?:rating|class)[:\s]*(A\+{0,3}|[A-G])\b", re.IGNORECASE), "energy_rating", 1),
+    (re.compile(r"\b(i[3579][-\s]?\d{4,5}\w*|Ryzen\s*\d\s*\d{4}\w*|M[1-4]\s*(?:Pro|Max|Ultra)?)\b", re.IGNORECASE), "processor", 0),
+    (re.compile(r"(\d+)\s*GB\s*RAM\b", re.IGNORECASE), "ram", 0),
+    (re.compile(r"(\d+)\s*(?:GB|TB)\s*(?:SSD|HDD|storage)\b", re.IGNORECASE), "storage", 0),
+    (re.compile(r"\b(ANC|active\s*noise\s*cancell?(?:ing|ation))\b", re.IGNORECASE), "noise_cancelling", 0),
+    (re.compile(r"\bfrost[\s-]*free\b", re.IGNORECASE), "frost_free", 0),
+    (re.compile(r"\binverter\b", re.IGNORECASE), "inverter", 0),
+    (re.compile(r"\b(HEPA|H1[0-4])\b", re.IGNORECASE), "filtration", 0),
+]
+
+
+def extract_specs_from_text(text: str) -> dict[str, str]:
+    """Extract product specification values from free text using regex patterns.
+
+    Returns a dict mapping criteria keys to their extracted values,
+    e.g. {"capacity": "350L", "noise_level": "39 dB"}.
+    """
+    if not text:
+        return {}
+
+    specs: dict[str, str] = {}
+    for pattern, key, group_idx in _SPEC_PATTERNS:
+        if key in specs:
+            continue
+        match = pattern.search(text)
+        if match:
+            value = match.group(group_idx).strip()
+            if value:
+                specs[key] = value
+
+    return specs
+
 
 def extract_domain(url: str) -> str:
     """Extract domain from URL, stripping 'www.' prefix."""
@@ -231,6 +277,14 @@ async def _extract_single_product(
         if key:
             model_id = hashlib.md5(key.encode()).hexdigest()[:12]
 
+    # Extract specs/criteria from full container text
+    criteria: dict[str, str] = {}
+    try:
+        full_text = (await container.inner_text()).strip()
+        criteria = extract_specs_from_text(full_text)
+    except Exception:
+        pass
+
     seller = Seller(
         name=domain,
         price=price,
@@ -243,6 +297,7 @@ async def _extract_single_product(
         model_id=model_id,
         brand=brand,
         image_url=image_url,
+        criteria=criteria,
         sellers=[seller],
     )
 
