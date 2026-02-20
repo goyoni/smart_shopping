@@ -214,22 +214,42 @@ async def discover_strategy(
             len(containers), container_selector,
         )
 
-        # Use first container to discover sub-selectors
-        first = containers[0]
-        name_sel = await _find_selector(first, _NAME_CANDIDATES)
-        price_sel = await _find_selector(first, _PRICE_CANDIDATES)
-        image_sel = await _find_selector(first, _IMAGE_CANDIDATES)
-        url_sel = await _find_selector(first, _URL_CANDIDATES)
+        # Probe up to 3 containers to find sub-selectors, since the first
+        # container may be a non-product element (e.g. sponsored banner).
+        name_sel = ""
+        price_sel = ""
+        image_sel = ""
+        url_sel = ""
+        for probe in containers[:3]:
+            if not name_sel:
+                name_sel = await _find_selector(probe, _NAME_CANDIDATES)
+            if not price_sel:
+                price_sel = await _find_selector(probe, _PRICE_CANDIDATES)
+            if not image_sel:
+                image_sel = await _find_selector(probe, _IMAGE_CANDIDATES)
+            if not url_sel:
+                url_sel = await _find_selector(probe, _URL_CANDIDATES)
 
         # Must find at least name selector
         if not name_sel:
             continue
 
+        # Use the first container that has a name for currency/criteria probing
+        probe_container = containers[0]
+        for c in containers[:3]:
+            try:
+                el = await c.query_selector(name_sel)
+                if el:
+                    probe_container = c
+                    break
+            except Exception:
+                continue
+
         # Detect currency from price if available
         currency_hint = ""
         if price_sel:
             try:
-                price_el = await first.query_selector(price_sel)
+                price_el = await probe_container.query_selector(price_sel)
                 if price_el:
                     price_text = await price_el.inner_text()
                     currency_hint = _detect_currency(price_text)
@@ -237,7 +257,7 @@ async def discover_strategy(
                 pass
 
         # Discover per-criterion CSS selectors
-        criteria_sels = await _discover_criteria_selectors(first, criteria)
+        criteria_sels = await _discover_criteria_selectors(probe_container, criteria)
 
         return ScrapingStrategy(
             product_container=container_selector,
