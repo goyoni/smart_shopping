@@ -174,7 +174,15 @@ class MainAgent:
                     criteria: dict[str, dict] = {}
                     if category:
                         await self._add_status(f"Looking up criteria for {category}...")
-                        criteria = get_criteria(category)
+                        with _tracer.start_as_current_span(
+                            "get_criteria",
+                            attributes={"category": category},
+                        ) as criteria_span:
+                            criteria = get_criteria(category)
+                            criteria_span.set_attribute(
+                                "criteria_keys",
+                                json.dumps(list(criteria.keys())),
+                            )
 
                     # Step 3: Web search (direct HTTP — no browser needed)
                     await self._add_status("Searching the web...")
