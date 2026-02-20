@@ -77,16 +77,34 @@ const criteriaDisplayNames: Record<string, string> = {
   noise_cancelling: "ANC",
   spin_speed: "Spin",
   cooling_capacity: "Cooling",
+  weight: "Weight",
+  power: "Power",
+  panel_type: "Panel",
+  refresh_rate: "Refresh",
+  frost_free: "Frost Free",
+  inverter: "Inverter",
+  filtration: "Filter",
 };
+
+function getProductUrl(sellers: Seller[]): string | null {
+  for (const s of sellers) {
+    if (s.url) return s.url;
+  }
+  return null;
+}
 
 export default function ProductCard({ product }: ProductCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [criteriaExpanded, setCriteriaExpanded] = useState(false);
 
   const bestPrice = getBestPrice(product.sellers);
   const domains = getSourceDomains(product.sellers);
+  const productUrl = getProductUrl(product.sellers);
   const criteriaEntries = Object.entries(product.criteria).filter(
     ([, v]) => v !== "" && v !== null && v !== undefined
   );
+  const visibleCriteria = criteriaExpanded ? criteriaEntries : criteriaEntries.slice(0, 4);
+  const hasMoreCriteria = criteriaEntries.length > 4;
 
   return (
     <div
@@ -100,7 +118,10 @@ export default function ProductCard({ product }: ProductCardProps) {
       }}
     >
       {/* Image */}
-      <div
+      <a
+        href={productUrl || undefined}
+        target="_blank"
+        rel="noopener noreferrer"
         style={{
           height: 180,
           background: "#f9fafb",
@@ -108,6 +129,8 @@ export default function ProductCard({ product }: ProductCardProps) {
           alignItems: "center",
           justifyContent: "center",
           overflow: "hidden",
+          cursor: productUrl ? "pointer" : "default",
+          textDecoration: "none",
         }}
       >
         {product.image_url ? (
@@ -117,9 +140,13 @@ export default function ProductCard({ product }: ProductCardProps) {
             style={{ maxHeight: "100%", maxWidth: "100%", objectFit: "contain" }}
           />
         ) : (
-          <span style={{ color: "#9ca3af", fontSize: "2rem" }}>No image</span>
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" aria-label="No image available">
+            <rect x="8" y="12" width="48" height="40" rx="4" stroke="#d1d5db" strokeWidth="2" fill="none" />
+            <circle cx="22" cy="28" r="5" stroke="#d1d5db" strokeWidth="2" fill="none" />
+            <path d="M8 44 l16-12 8 6 12-10 12 16" stroke="#d1d5db" strokeWidth="2" fill="none" strokeLinejoin="round" />
+          </svg>
         )}
-      </div>
+      </a>
 
       {/* Body */}
       <div style={{ padding: "0.75rem", flex: 1 }}>
@@ -143,7 +170,20 @@ export default function ProductCard({ product }: ProductCardProps) {
             overflow: "hidden",
           }}
         >
-          {product.name}
+          {productUrl ? (
+            <a
+              href={productUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "inherit", textDecoration: "none" }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "#2563eb")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "inherit")}
+            >
+              {product.name}
+            </a>
+          ) : (
+            product.name
+          )}
         </h3>
 
         {/* Price */}
@@ -187,21 +227,41 @@ export default function ProductCard({ product }: ProductCardProps) {
 
         {/* Criteria badges */}
         {criteriaEntries.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem", marginBottom: "0.5rem" }}>
-            {criteriaEntries.slice(0, 4).map(([key, value]) => (
-              <span
-                key={key}
+          <div style={{ marginBottom: "0.5rem" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "0.25rem" }}>
+              {visibleCriteria.map(([key, value]) => (
+                <span
+                  key={key}
+                  style={{
+                    background: "#f3f4f6",
+                    borderRadius: 4,
+                    padding: "0.15rem 0.4rem",
+                    fontSize: "0.7rem",
+                    color: "#374151",
+                  }}
+                >
+                  {criteriaDisplayNames[key] || key}: {String(value)}
+                </span>
+              ))}
+            </div>
+            {hasMoreCriteria && (
+              <button
+                onClick={() => setCriteriaExpanded(!criteriaExpanded)}
                 style={{
-                  background: "#f3f4f6",
-                  borderRadius: 4,
-                  padding: "0.15rem 0.4rem",
+                  background: "none",
+                  border: "none",
+                  padding: "0.15rem 0",
                   fontSize: "0.7rem",
-                  color: "#374151",
+                  color: "#6b7280",
+                  cursor: "pointer",
+                  marginTop: "0.25rem",
                 }}
               >
-                {criteriaDisplayNames[key] || key}: {String(value)}
-              </span>
-            ))}
+                {criteriaExpanded
+                  ? "Show less"
+                  : `+${criteriaEntries.length - 4} more`}
+              </button>
+            )}
           </div>
         )}
 

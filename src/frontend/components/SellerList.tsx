@@ -53,15 +53,17 @@ export default function SellerList({ sellers }: SellerListProps) {
             fontSize: "0.9rem",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", minWidth: 0 }}>
             {seller.url ? (
               <a
                 href={seller.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ color: "#2563eb", textDecoration: "none" }}
+                style={{ color: "#2563eb", textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               >
-                {extractDomain(seller.url)}
+                {seller.name && seller.name !== extractDomain(seller.url)
+                  ? seller.name
+                  : extractDomain(seller.url)}
               </a>
             ) : (
               <span>{seller.name}</span>
