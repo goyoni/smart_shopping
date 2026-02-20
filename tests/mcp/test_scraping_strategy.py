@@ -31,6 +31,20 @@ class TestScrapingStrategy:
         assert parsed.price_selector == "[class*='price']"
         assert parsed.currency_hint == "USD"
 
+    def test_json_roundtrip_with_criteria_selectors(self):
+        strategy = ScrapingStrategy(
+            product_container=".product",
+            name_selector="h2",
+            criteria_selectors={"noise_level": "[class*='noise']", "weight": "[data-spec='weight']"},
+        )
+        json_str = strategy.to_json()
+        parsed = ScrapingStrategy.from_json(json_str)
+
+        assert parsed.criteria_selectors == {
+            "noise_level": "[class*='noise']",
+            "weight": "[data-spec='weight']",
+        }
+
     def test_from_json_unknown_fields_ignored(self):
         data = json.dumps({
             "product_container": ".item",
@@ -41,12 +55,21 @@ class TestScrapingStrategy:
         assert strategy.product_container == ".item"
         assert strategy.name_selector == "h3"
 
+    def test_from_json_missing_criteria_selectors_defaults_empty(self):
+        data = json.dumps({
+            "product_container": ".item",
+            "name_selector": "h3",
+        })
+        strategy = ScrapingStrategy.from_json(data)
+        assert strategy.criteria_selectors == {}
+
     def test_default_values(self):
         strategy = ScrapingStrategy(product_container=".card")
         assert strategy.name_selector == ""
         assert strategy.price_selector == ""
         assert strategy.version == 1
         assert strategy.discovery_method == "css_candidates"
+        assert strategy.criteria_selectors == {}
 
 
 class TestLooksLikePrice:

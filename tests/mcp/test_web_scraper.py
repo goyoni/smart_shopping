@@ -236,3 +236,31 @@ class TestExtractSpecsFromText:
         assert "noise_level" in specs
         assert "energy_rating" in specs
         assert "frost_free" in specs
+
+
+class TestExtractSpecsWithCriteria:
+    """Tests for extract_specs_from_text with explicit criteria dicts."""
+
+    def test_custom_criteria_noise(self):
+        criteria = {"noise_level": {"unit": "dB"}}
+        specs = extract_specs_from_text("Operating at 42 dB", criteria=criteria)
+        assert "noise_level" in specs
+
+    def test_custom_criteria_unknown_unit(self):
+        criteria = {"mystery": {"unit": "zorps"}}
+        specs = extract_specs_from_text("mystery 5 zorps", criteria=criteria)
+        assert specs == {}
+
+    def test_custom_criteria_weight(self):
+        criteria = {"weight": {"unit": "kg"}}
+        specs = extract_specs_from_text("Total weight 12 kg", criteria=criteria)
+        assert specs["weight"] == "12 kg"
+
+    def test_custom_criteria_only_extracts_requested(self):
+        criteria = {"noise_level": {"unit": "dB"}}
+        text = "Weight: 55 kg, Noise: 39 dB, 350 liters"
+        specs = extract_specs_from_text(text, criteria=criteria)
+        assert "noise_level" in specs
+        # weight and capacity should NOT be extracted since not in criteria
+        assert "weight" not in specs
+        assert "capacity" not in specs

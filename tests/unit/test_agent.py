@@ -159,7 +159,7 @@ async def test_main_agent_scrape_site_error_continues():
 
     call_count = 0
 
-    async def mock_scrape(browser, url, query, *, locale="en-US"):
+    async def mock_scrape(browser, url, query, *, locale="en-US", criteria=None):
         nonlocal call_count
         call_count += 1
         if "amazon.com" in url:
@@ -268,7 +268,7 @@ async def test_pipeline_passes_locale_to_scraper():
 
     scrape_kwargs: dict = {}
 
-    async def capture_scrape(browser, url, query, *, locale="en-US"):
+    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
         scrape_kwargs["locale"] = locale
         return []
 
@@ -297,3 +297,36 @@ async def test_pipeline_extracts_category():
 
     # Should have the criteria lookup status message
     assert any("criteria" in m.lower() for m in state.status_messages)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_criteria_to_scraper():
+    """Verify criteria dict is forwarded to scrape_page for known categories."""
+    mock_browser = AsyncMock()
+
+    mock_search_results = [
+        SearchResult(url="https://www.amazon.com/dp/B1", title="Fridge", snippet="quiet fridge"),
+    ]
+
+    scrape_kwargs: dict = {}
+
+    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
+        scrape_kwargs["criteria"] = criteria
+        return []
+
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_get_browser.return_value = mock_ctx
+
+        agent = MainAgent(session_id="test-criteria-pass")
+        await agent.process_query("quiet refrigerator", language="en", market="us")
+
+    # "refrigerator" is a known category, so criteria should be non-None
+    assert scrape_kwargs.get("criteria") is not None
+    assert isinstance(scrape_kwargs["criteria"], dict)
