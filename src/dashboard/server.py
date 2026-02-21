@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Storage: {storage_path.resolve()}")
     print("Press Ctrl+C to stop.\n")
 
-    px.launch_app()
+    px.launch_app(use_temp_dir=False)
 
     # Block until SIGINT/SIGTERM. Using an Event instead of input() so
     # the process survives being backgrounded (stdin closed).
