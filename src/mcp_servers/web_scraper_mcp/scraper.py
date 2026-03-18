@@ -21,6 +21,21 @@ from src.shared.models import ProductResult, Seller
 logger = get_logger(__name__)
 
 _MAX_PRODUCTS_PER_SITE = 50
+_MAX_PAGES = 3
+
+# CSS selectors tried in order to find a "next page" link
+_NEXT_PAGE_CANDIDATES: list[str] = [
+    "a[aria-label*='next' i]",
+    "a[rel='next']",
+    "a.next",
+    "a.pagination-next",
+    "li.next > a",
+    "a[class*='next']",
+    "a[class*='Next']",
+    "button[aria-label*='next' i]",
+    "nav[aria-label*='pagination'] a:last-child",
+    "[class*='pagination'] a:last-child",
+]
 
 
 def extract_specs_from_text(
@@ -92,6 +107,20 @@ def parse_price(text: str) -> float | None:
         return None
 
 
+async def _find_next_page_url(page: object, base_url: str) -> str | None:
+    """Detect a 'next page' link on the current page."""
+    for selector in _NEXT_PAGE_CANDIDATES:
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                href = await el.get_attribute("href")
+                if href:
+                    return urljoin(base_url, href)
+        except Exception:
+            continue
+    return None
+
+
 async def scrape_page(
     browser: Browser,
     url: str,
@@ -107,6 +136,7 @@ async def scrape_page(
     3. If cached: use it; on failure re-discover
     4. If not cached: discover strategy
     5. Extract products
+    6. Follow pagination links for additional pages
     """
     domain = extract_domain(url)
 
@@ -125,31 +155,63 @@ async def scrape_page(
 
         # Try cached strategy first
         cached = await get_cached_strategy(domain)
+        strategy: ScrapingStrategy | None = None
         if cached:
             logger.info("Using cached strategy for %s", domain)
             products = await _extract_with_strategy(page, cached, url, criteria=criteria)
             if products:
                 await update_success_rate(domain, success=True)
-                return products
+                strategy = cached
             else:
                 logger.info("Cached strategy failed for %s, re-discovering", domain)
                 await update_success_rate(domain, success=False)
 
-        # Discover new strategy
-        strategy = await discover_strategy(page, product_query, criteria=criteria)
-        if not strategy:
-            logger.warning("No strategy discovered for %s", domain)
-            return []
+        if strategy is None:
+            # Discover new strategy
+            strategy = await discover_strategy(page, product_query, criteria=criteria)
+            if not strategy:
+                logger.warning("No strategy discovered for %s", domain)
+                return []
 
-        # Save strategy
-        await save_strategy(domain, strategy)
+            # Save strategy
+            await save_strategy(domain, strategy)
 
-        # Extract products
-        products = await _extract_with_strategy(page, strategy, url, criteria=criteria)
-        if not products:
-            logger.warning("Strategy discovered but no products extracted from %s", url)
+            # Extract products from first page
+            products = await _extract_with_strategy(page, strategy, url, criteria=criteria)
+            if not products:
+                logger.warning("Strategy discovered but no products extracted from %s", url)
+                return []
 
-        return products
+        # Paginate: follow next-page links for additional results
+        visited = {url}
+        current_url = url
+        for page_num in range(2, _MAX_PAGES + 1):
+            if len(products) >= _MAX_PRODUCTS_PER_SITE:
+                break
+
+            next_url = await _find_next_page_url(page, current_url)
+            if not next_url or next_url in visited:
+                break
+            visited.add(next_url)
+
+            try:
+                await page.goto(next_url, wait_until="domcontentloaded", timeout=20000)
+                await page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                logger.warning("Failed to navigate to page %d: %s", page_num, next_url)
+                break
+
+            page_products = await _extract_with_strategy(
+                page, strategy, next_url, criteria=criteria,
+            )
+            if not page_products:
+                break
+
+            products.extend(page_products)
+            current_url = next_url
+            logger.info("Page %d: extracted %d products from %s", page_num, len(page_products), domain)
+
+        return products[:_MAX_PRODUCTS_PER_SITE]
 
 
 async def _extract_with_strategy(

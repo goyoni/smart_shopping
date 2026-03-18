@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from urllib.parse import quote_plus, unquote
 
-import httpx
+import litellm
+from curl_cffi.requests import AsyncSession
 from opentelemetry import trace
 
+from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
+from src.shared.config import settings
 from src.shared.logging import get_logger, get_tracer
 
 logger = get_logger(__name__)
@@ -21,6 +25,74 @@ _BUY_ONLINE_SUFFIXES: dict[str, str] = {
     "ar": "شراء عبر الإنترنت",
     "en": "buy online",
 }
+
+# Market-specific buy-online overrides.  When the market is known to have
+# a dominant local language, use its shopping suffix regardless of the
+# user's browser language so that search results surface local sellers.
+_MARKET_BUY_ONLINE: dict[str, str] = {
+    "il": "קנייה אונליין",
+    "de": "online kaufen",
+    "fr": "acheter en ligne",
+}
+
+# Maps a market to its dominant language.  Used to decide whether a
+# second localized search is needed when the query language differs.
+_MARKET_LANGUAGE: dict[str, str] = {
+    "il": "he",
+    "de": "de",
+    "fr": "fr",
+}
+
+# Google country-specific domains for browser-based search
+_GOOGLE_DOMAINS: dict[str, str] = {
+    "il": "google.co.il",
+    "uk": "google.co.uk",
+    "de": "google.de",
+    "fr": "google.fr",
+    "us": "google.com",
+}
+
+_LANG_NAMES: dict[str, str] = {
+    "he": "Hebrew",
+    "ar": "Arabic",
+    "en": "English",
+    "de": "German",
+    "fr": "French",
+}
+
+
+async def _translate_query(query: str, target_lang: str) -> str | None:
+    """Translate a search query to the target language using LLM.
+
+    Returns None when the API key is not configured or on any failure.
+    """
+    if not settings.llm_api_key:
+        return None
+
+    target_name = _LANG_NAMES.get(target_lang, target_lang)
+    try:
+        response = await litellm.acompletion(
+            model=settings.llm_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"Translate the following product search query to {target_name}. "
+                        "Return ONLY the translated query, nothing else."
+                    ),
+                },
+                {"role": "user", "content": query},
+            ],
+            temperature=0.1,
+            api_key=settings.llm_api_key,
+        )
+        translated = (response.choices[0].message.content or "").strip()
+        if translated:
+            logger.info("Translated query to %s: '%s' -> '%s'", target_name, query, translated)
+            return translated
+    except Exception:
+        logger.warning("Query translation to %s failed", target_name, exc_info=True)
+    return None
 
 _REGION_CODES: dict[str, str] = {
     "il": "il-he",
@@ -40,6 +112,22 @@ _REQUEST_HEADERS = {
 
 _REQUEST_TIMEOUT = 20.0
 
+# Technical search terms for each attribute criterion+direction pair
+_ATTRIBUTE_SEARCH_TERMS: dict[tuple[str, str], str] = {
+    ("noise_level", "low"): "low noise dB",
+    ("noise_level", "high"): "high power noise",
+    ("capacity", "high"): "large capacity",
+    ("capacity", "low"): "compact small",
+    ("energy_rating", "high"): "energy efficient",
+    ("energy_rating", "low"): "",
+    ("weight", "low"): "lightweight",
+    ("weight", "high"): "heavy duty",
+    ("power", "high"): "high power",
+    ("power", "low"): "low power",
+    ("price", "low"): "affordable",
+    ("price", "high"): "premium",
+}
+
 
 @dataclass
 class SearchResult:
@@ -48,14 +136,92 @@ class SearchResult:
     snippet: str
 
 
-def build_search_url(query: str, language: str = "en", market: str = "us") -> str:
+def build_refined_query(
+    query: str,
+    category: str | None,
+    attributes: list[QueryAttribute],
+) -> str:
+    """Build a search query informed by extracted category and user-intent attributes.
+
+    - Uses canonical category name instead of user's alias (e.g. "refrigerator" not "fridge")
+    - Appends technical search terms for each attribute
+    - Keeps user's non-attribute/non-category words
+    """
+    if not category and not attributes:
+        return query
+
+    text = query.lower().strip()
+
+    # Collect words to remove (attribute keywords and category aliases)
+    remove_words: set[str] = set()
+    for attr in attributes:
+        remove_words.add(attr.display_label.lower())
+
+    # Build technical terms from attributes
+    technical_terms: list[str] = []
+    for attr in attributes:
+        term = _ATTRIBUTE_SEARCH_TERMS.get(
+            (attr.criterion_key, attr.direction), ""
+        )
+        if term:
+            technical_terms.append(term)
+        elif attr.display_label:
+            # LLM-discovered attributes: use display_label as search term
+            technical_terms.append(attr.display_label)
+
+    # Remove attribute keywords from user query
+    remaining = text
+    for word in sorted(remove_words, key=lambda w: -len(w)):
+        remaining = remaining.replace(word, " ")
+    # Clean up extra whitespace
+    remaining = " ".join(remaining.split())
+
+    # If we have a category, remove category aliases from remaining text too
+    if category:
+        # Remove the canonical category and common aliases
+        from src.mcp_servers.product_criteria_mcp.criteria import (
+            _ENGLISH_ALIASES,
+            _HEBREW_TO_ENGLISH,
+            _ARABIC_TO_ENGLISH,
+        )
+        all_aliases = list(_ENGLISH_ALIASES.keys()) + list(_HEBREW_TO_ENGLISH.keys()) + list(_ARABIC_TO_ENGLISH.keys())
+        # Also include the canonical name itself
+        all_aliases.append(category)
+        all_aliases.append(category.replace("_", " "))
+        for alias in sorted(all_aliases, key=lambda a: -len(a)):
+            if alias.lower() in remaining:
+                remaining = remaining.replace(alias.lower(), " ")
+        remaining = " ".join(remaining.split())
+
+    # Assemble: category + technical terms + remaining user words
+    parts: list[str] = []
+    if category:
+        parts.append(category.replace("_", " "))
+    parts.extend(technical_terms)
+    if remaining:
+        parts.append(remaining)
+
+    return " ".join(parts)
+
+
+def build_search_url(
+    query: str,
+    language: str = "en",
+    market: str = "us",
+    refined_query: str | None = None,
+) -> str:
     """Build the augmented search query URL.
 
     Augments query with 'buy online' in the appropriate language to bias
     toward shopping results.  Returns the DuckDuckGo HTML endpoint URL.
+
+    If ``refined_query`` is provided, it is used instead of the raw ``query``
+    for URL construction.
     """
-    suffix = _BUY_ONLINE_SUFFIXES.get(language, "buy online")
-    augmented_query = f"{query} {suffix}"
+    search_text = refined_query if refined_query else query
+    # Prefer market-specific suffix to surface local sellers, then language
+    suffix = _MARKET_BUY_ONLINE.get(market) or _BUY_ONLINE_SUFFIXES.get(language, "buy online")
+    augmented_query = f"{search_text} {suffix}"
     encoded = quote_plus(augmented_query)
     kl = _REGION_CODES.get(market, "us-en")
     return f"{_SEARCH_URL}?q={encoded}&kl={kl}"
@@ -119,46 +285,29 @@ def extract_search_results(html: str) -> list[SearchResult]:
     return results
 
 
-async def search_products(
+async def _run_single_search(
+    url: str,
     query: str,
-    language: str = "en",
-    market: str = "us",
     *,
     _max_attempts: int = 2,
 ) -> list[SearchResult]:
-    """Search for products and return results.
-
-    Uses DuckDuckGo's HTML endpoint which returns server-rendered HTML
-    (no JavaScript required).  Retries once on transient failures.
-    Returns empty list on HTTP errors or network issues.
-    """
-    url = build_search_url(query, language, market)
-    span = trace.get_current_span()
-    span.set_attribute("search_url", url)
-
-    logger.info("Starting search for '%s' (language=%s, market=%s)", query, language, market)
-    span.add_event("search_started", {"query": query, "language": language, "market": market, "url": url})
-
+    """Execute one DuckDuckGo HTML search and return parsed results."""
     for attempt in range(1, _max_attempts + 1):
         try:
-            async with httpx.AsyncClient(
+            async with AsyncSession(
                 timeout=_REQUEST_TIMEOUT,
-                follow_redirects=True,
                 headers=_REQUEST_HEADERS,
+                impersonate="chrome",
             ) as client:
-                response = await client.get(url)
+                response = await client.get(url, allow_redirects=True)
         except Exception:
             logger.warning(
                 "HTTP request failed for '%s' (attempt %d/%d)",
                 query, attempt, _max_attempts,
             )
             if attempt == _max_attempts:
-                span.set_attribute("exit_reason", "request_failed")
-                span.add_event("search_completed", {"exit_reason": "request_failed"})
                 return []
             continue
-
-        span.set_attribute("http_status", response.status_code)
 
         if response.status_code != 200:
             logger.warning(
@@ -166,21 +315,204 @@ async def search_products(
                 response.status_code, query, attempt, _max_attempts,
             )
             if attempt == _max_attempts:
-                span.set_attribute("exit_reason", f"http_{response.status_code}")
-                span.add_event("search_completed", {"exit_reason": f"http_{response.status_code}"})
                 return []
             continue
 
         html = response.text
         results = extract_search_results(html)
         if not results:
-            span.set_attribute("exit_reason", "no_results_extracted")
-            span.add_event("search_completed", {"result_count": 0, "exit_reason": "no_results_extracted"})
             logger.warning("No results extracted from HTML for '%s'", query)
-            logger.warning("Response content (first 500 chars): %s", html[:500])
         else:
-            span.add_event("search_completed", {"result_count": len(results)})
             logger.info("Found %d search results for '%s'", len(results), query)
         return results
 
     return []
+
+
+async def search_products(
+    query: str,
+    language: str = "en",
+    market: str = "us",
+    *,
+    refined_query: str | None = None,
+    _max_attempts: int = 2,
+) -> list[SearchResult]:
+    """Search for products and return results.
+
+    Uses DuckDuckGo's HTML endpoint which returns server-rendered HTML
+    (no JavaScript required).  Retries once on transient failures.
+    Returns empty list on HTTP errors or network issues.
+
+    If ``refined_query`` is provided, it is used for search URL construction
+    instead of the raw ``query``.
+
+    When the market's dominant language differs from the query language,
+    a second search is run using the market's language suffix and the
+    results are merged (local results first, deduped by URL).
+    """
+    url = build_search_url(query, language, market, refined_query=refined_query)
+    span = trace.get_current_span()
+    span.set_attribute("search_url", url)
+
+    logger.info("Starting search for '%s' (language=%s, market=%s)", query, language, market)
+    span.add_event("search_started", {"query": query, "language": language, "market": market, "url": url})
+
+    # Determine if a second localized search is needed
+    market_lang = _MARKET_LANGUAGE.get(market)
+    need_local_search = market_lang is not None and market_lang != language
+
+    if need_local_search:
+        # Translate the query to the market's language for local results
+        translated = await _translate_query(
+            refined_query or query, market_lang,
+        )
+        if translated:
+            local_url = build_search_url(
+                translated, market_lang, market,
+            )
+            span.set_attribute("local_search_url", local_url)
+            span.set_attribute("translated_query", translated)
+            span.add_event("dual_search", {"local_url": local_url, "translated": translated})
+
+            # Run both searches concurrently
+            primary_task = _run_single_search(url, query, _max_attempts=_max_attempts)
+            local_task = _run_single_search(local_url, translated, _max_attempts=_max_attempts)
+            primary_results, local_results = await asyncio.gather(primary_task, local_task)
+
+            # Merge: local results first (deduped by URL)
+            seen_urls: set[str] = set()
+            merged: list[SearchResult] = []
+            for r in local_results + primary_results:
+                if r.url not in seen_urls:
+                    seen_urls.add(r.url)
+                    merged.append(r)
+
+            span.set_attribute("result_count", len(merged))
+            span.set_attribute("local_result_count", len(local_results))
+            span.set_attribute("primary_result_count", len(primary_results))
+            span.add_event("search_completed", {"result_count": len(merged)})
+            logger.info(
+                "Dual search: %d local + %d primary = %d merged for '%s'",
+                len(local_results), len(primary_results), len(merged), query,
+            )
+            return merged
+
+    # Single search (market matches query language)
+    results = await _run_single_search(url, query, _max_attempts=_max_attempts)
+    span.set_attribute("result_count", len(results))
+    if not results:
+        span.set_attribute("exit_reason", "no_results_extracted")
+        span.add_event("search_completed", {"result_count": 0, "exit_reason": "no_results_extracted"})
+    else:
+        span.add_event("search_completed", {"result_count": len(results)})
+    return results
+
+
+async def search_products_via_browser(
+    browser: object,
+    query: str,
+    language: str = "en",
+    market: str = "us",
+    *,
+    refined_query: str | None = None,
+) -> list[SearchResult]:
+    """Search for products using a Playwright browser with proper locale.
+
+    Uses the country-specific Google domain so that the search engine
+    returns local sellers with local-currency prices — the same results
+    the user would see in their own browser.
+
+    Falls back to :func:`search_products` (HTTP-based DuckDuckGo) when the
+    browser search yields no results.
+    """
+    from src.shared.browser import get_page  # avoid circular at module level
+
+    search_text = refined_query or query
+    google_domain = _GOOGLE_DOMAINS.get(market, "google.com")
+    suffix = _MARKET_BUY_ONLINE.get(market) or _BUY_ONLINE_SUFFIXES.get(language, "buy online")
+    search_url = f"https://www.{google_domain}/search?q={quote_plus(f'{search_text} {suffix}')}"
+
+    locale = f"{language}-{market.upper()}"
+    market_lang = _MARKET_LANGUAGE.get(market)
+    if market_lang and market_lang != language:
+        locale = f"{market_lang}-{market.upper()}"
+
+    span = trace.get_current_span()
+    span.set_attribute("browser_search_url", search_url)
+    span.set_attribute("browser_locale", locale)
+    logger.info("Browser search: '%s' on %s (locale=%s)", search_text, google_domain, locale)
+
+    try:
+        async with get_page(browser, locale=locale) as page:
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+
+            # Accept Google consent if prompted
+            try:
+                consent_btn = page.locator("button:has-text('Accept'), button:has-text('הסכמה'), button:has-text('אישור')")
+                if await consent_btn.count() > 0:
+                    await consent_btn.first.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+
+            # Extract search result links
+            results: list[SearchResult] = []
+            seen_urls: set[str] = set()
+
+            anchors = page.locator("a[href]")
+            count = await anchors.count()
+
+            for i in range(min(count, 100)):
+                try:
+                    anchor = anchors.nth(i)
+                    href = await anchor.get_attribute("href") or ""
+                    if not href or href.startswith("#") or href.startswith("javascript:"):
+                        continue
+
+                    # Skip Google's own links
+                    parsed = urlparse(href)
+                    host = parsed.hostname or ""
+                    if any(g in host for g in ("google.", "gstatic.", "googleapis.", "youtube.")):
+                        continue
+                    if not parsed.scheme or parsed.scheme not in ("http", "https"):
+                        continue
+
+                    # Resolve Google redirect URLs (/url?q=...)
+                    if "/url?" in href and "q=" in href:
+                        from urllib.parse import parse_qs
+                        qs = parse_qs(parsed.query)
+                        actual = qs.get("q", [""])[0] or qs.get("url", [""])[0]
+                        if actual:
+                            href = actual
+                        else:
+                            continue
+
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+
+                    title = (await anchor.inner_text()).strip()[:200]
+                    if not title:
+                        continue
+
+                    results.append(SearchResult(
+                        url=href,
+                        title=title,
+                        snippet="",
+                    ))
+                except Exception:
+                    continue
+
+            span.set_attribute("browser_result_count", len(results))
+            logger.info("Browser search found %d results for '%s'", len(results), query)
+
+            if results:
+                return results
+
+    except Exception:
+        logger.warning("Browser search failed for '%s'", query, exc_info=True)
+        span.set_attribute("browser_search_error", "true")
+
+    # Fallback to HTTP-based search
+    logger.info("Falling back to HTTP search for '%s'", query)
+    return await search_products(query, language, market, refined_query=refined_query)

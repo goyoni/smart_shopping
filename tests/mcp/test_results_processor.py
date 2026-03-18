@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.mcp_servers.results_processor_mcp.processor import (
     aggregate_sellers,
     format_results,
@@ -222,3 +223,71 @@ class TestFormatResults:
         ]
         result = format_results(products, "single_product")
         assert result["source_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Attribute-weighted sorting
+# ---------------------------------------------------------------------------
+
+class TestAttributeWeightedSorting:
+    def test_products_with_matching_criteria_rank_higher(self):
+        """Products with data for user-requested criteria should rank above those without."""
+        p_with_data = _product(
+            "Quiet Fridge",
+            price=500,
+            criteria={"noise_level": "38 dB", "capacity": "350L"},
+        )
+        p_without_data = _product(
+            "Basic Fridge",
+            price=400,
+            criteria={},
+        )
+        attrs = [
+            QueryAttribute("noise_level", "low", "quiet"),
+            QueryAttribute("capacity", "high", "large"),
+        ]
+        result = format_results(
+            [p_without_data, p_with_data],
+            "single_product",
+            user_attributes=attrs,
+        )
+        # Product with matching criteria data should come first
+        assert result["products"][0]["product"]["name"] == "Quiet Fridge"
+
+    def test_falls_back_to_price_when_no_attributes(self):
+        """Without user_attributes, default price sort applies."""
+        products = [
+            _product("Expensive", price=100),
+            _product("Cheap", price=10),
+        ]
+        result = format_results(products, "single_product", user_attributes=None)
+        assert result["products"][0]["best_price"] == 10
+
+    def test_price_tiebreak_with_equal_criteria_match(self):
+        """When criteria match count is equal, cheaper product comes first."""
+        p1 = _product("A", price=500, criteria={"noise_level": "40 dB"})
+        p2 = _product("B", price=300, criteria={"noise_level": "35 dB"})
+        attrs = [QueryAttribute("noise_level", "low", "quiet")]
+        result = format_results([p1, p2], "single_product", user_attributes=attrs)
+        assert result["products"][0]["best_price"] == 300
+
+    def test_premium_price_direction(self):
+        """User wanting 'premium' should get higher-priced products first."""
+        p_cheap = _product("Budget", price=100, criteria={})
+        p_pricey = _product("Premium", price=1000, criteria={})
+        attrs = [QueryAttribute("price", "high", "premium")]
+        result = format_results(
+            [p_cheap, p_pricey],
+            "single_product",
+            user_attributes=attrs,
+        )
+        assert result["products"][0]["product"]["name"] == "Premium"
+
+    def test_empty_attributes_list_uses_price_sort(self):
+        """An empty attributes list should behave like no attributes."""
+        products = [
+            _product("Expensive", price=100),
+            _product("Cheap", price=10),
+        ]
+        result = format_results(products, "single_product", user_attributes=[])
+        assert result["products"][0]["best_price"] == 10

@@ -8,6 +8,8 @@ import pytest
 
 from src.mcp_servers.product_criteria_mcp.criteria import (
     CriterionSpec,
+    QueryAttribute,
+    extract_query_attributes,
     get_criteria,
     merge_criteria,
     normalize_category,
@@ -226,3 +228,65 @@ class TestDbCache:
         result2 = await get_cached(category)
         assert "b" in result2
         assert "a" not in result2
+
+
+# ---------------------------------------------------------------------------
+# extract_query_attributes
+# ---------------------------------------------------------------------------
+
+class TestExtractQueryAttributes:
+    def test_single_attribute(self):
+        attrs = extract_query_attributes("quiet refrigerator")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "noise_level"
+        assert attrs[0].direction == "low"
+
+    def test_multiple_attributes(self):
+        attrs = extract_query_attributes("quiet fridge for a large family")
+        keys = {a.criterion_key for a in attrs}
+        assert "noise_level" in keys
+        assert "capacity" in keys
+
+    def test_no_attributes(self):
+        attrs = extract_query_attributes("refrigerator")
+        assert attrs == []
+
+    def test_case_insensitive(self):
+        attrs = extract_query_attributes("QUIET Fridge")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "noise_level"
+
+    def test_hebrew_attribute(self):
+        attrs = extract_query_attributes("מקרר שקט")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "noise_level"
+
+    def test_multi_word_attribute_takes_precedence(self):
+        attrs = extract_query_attributes("low noise refrigerator")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "noise_level"
+        assert attrs[0].display_label == "low noise"
+
+    def test_deduplicates_by_criterion_key(self):
+        # "quiet" and "silent" both map to noise_level — only first match kept
+        attrs = extract_query_attributes("quiet silent refrigerator")
+        noise_attrs = [a for a in attrs if a.criterion_key == "noise_level"]
+        assert len(noise_attrs) == 1
+
+    def test_price_attribute(self):
+        attrs = extract_query_attributes("cheap laptop")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "price"
+        assert attrs[0].direction == "low"
+
+    def test_energy_efficient(self):
+        attrs = extract_query_attributes("energy efficient washing machine")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "energy_rating"
+        assert attrs[0].direction == "high"
+
+    def test_compact(self):
+        attrs = extract_query_attributes("compact microwave")
+        assert len(attrs) == 1
+        assert attrs[0].criterion_key == "capacity"
+        assert attrs[0].direction == "low"

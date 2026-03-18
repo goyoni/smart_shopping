@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.mcp_servers.web_scraper_mcp.scraper import (
+    _find_next_page_url,
     extract_domain,
     extract_specs_from_text,
     parse_price,
@@ -264,3 +265,139 @@ class TestExtractSpecsWithCriteria:
         # weight and capacity should NOT be extracted since not in criteria
         assert "weight" not in specs
         assert "capacity" not in specs
+
+
+# ---------------------------------------------------------------------------
+# Pagination
+# ---------------------------------------------------------------------------
+
+
+class TestFindNextPageUrl:
+    @pytest.mark.asyncio
+    async def test_finds_next_link_by_rel(self):
+        mock_el = AsyncMock()
+        mock_el.get_attribute.return_value = "/page/2"
+
+        mock_page = AsyncMock()
+
+        async def mock_qs(selector):
+            if selector == "a[rel='next']":
+                return mock_el
+            return None
+
+        mock_page.query_selector = mock_qs
+
+        result = await _find_next_page_url(mock_page, "https://shop.example.com")
+        assert result == "https://shop.example.com/page/2"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_next(self):
+        mock_page = AsyncMock()
+        mock_page.query_selector.return_value = None
+
+        result = await _find_next_page_url(mock_page, "https://shop.example.com")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_resolves_relative_url(self):
+        mock_el = AsyncMock()
+        mock_el.get_attribute.return_value = "?page=3"
+
+        mock_page = AsyncMock()
+
+        async def mock_qs(selector):
+            if "aria-label" in selector and "next" in selector.lower():
+                return mock_el
+            return None
+
+        mock_page.query_selector = mock_qs
+
+        result = await _find_next_page_url(mock_page, "https://shop.example.com/search")
+        assert result == "https://shop.example.com/search?page=3"
+
+
+class TestScrapePagePagination:
+    @pytest.mark.asyncio
+    async def test_follows_pagination(self):
+        strategy = ScrapingStrategy(
+            product_container=".product-card",
+            name_selector="h2",
+            price_selector=".price",
+        )
+
+        def make_container(name, price_text):
+            mock_name_el = AsyncMock()
+            mock_name_el.inner_text.return_value = name
+            mock_price_el = AsyncMock()
+            mock_price_el.inner_text.return_value = price_text
+            container = AsyncMock()
+
+            async def qs(selector):
+                if selector == "h2":
+                    return mock_name_el
+                if selector == ".price":
+                    return mock_price_el
+                return None
+
+            container.query_selector = qs
+            container.inner_text = AsyncMock(return_value=f"{name} {price_text}")
+            return container
+
+        page1_containers = [make_container("Product A", "$100")]
+        page2_containers = [make_container("Product B", "$200")]
+
+        goto_count = 0
+
+        mock_page = AsyncMock()
+
+        async def mock_query_all(selector):
+            nonlocal goto_count
+            if selector == ".product-card":
+                return page1_containers if goto_count <= 1 else page2_containers
+            return []
+
+        mock_page.query_selector_all = mock_query_all
+
+        # First call: no next link (page 1 already loaded via goto)
+        # After page 1 extraction, _find_next_page_url is called
+        next_link_el = AsyncMock()
+        next_link_el.get_attribute.return_value = "/page/2"
+
+        qs_call_count = 0
+
+        async def mock_qs(selector):
+            nonlocal qs_call_count
+            qs_call_count += 1
+            # Only return next link after page 1
+            if goto_count <= 1 and "next" in selector.lower():
+                return next_link_el
+            return None
+
+        mock_page.query_selector = mock_qs
+
+        original_goto = mock_page.goto
+
+        async def track_goto(*args, **kwargs):
+            nonlocal goto_count
+            goto_count += 1
+
+        mock_page.goto = track_goto
+
+        mock_browser = AsyncMock()
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
+        ):
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_get_page.return_value = mock_ctx
+
+            results = await scrape_page(mock_browser, "https://shop.example.com/search")
+
+        # Should have products from both pages
+        assert len(results) == 2
+        assert results[0].name == "Product A"
+        assert results[1].name == "Product B"

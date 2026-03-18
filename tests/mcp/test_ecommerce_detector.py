@@ -126,3 +126,46 @@ class TestIdentifyEcommerceSites:
         results = identify_ecommerce_sites(urls_data)
         assert len(results) == 1
         assert results[0].domain == "ebay.com"
+
+
+class TestCommercialTldHeuristic:
+    def test_co_il_unknown_domain(self):
+        """An unknown .co.il domain should pass the threshold."""
+        signal = detect_ecommerce("https://www.cassias.co.il/product/123")
+        assert signal.is_ecommerce is True
+        assert signal.confidence >= 0.4
+        assert any("commercial_tld" in s for s in signal.signals)
+
+    def test_co_il_with_keywords_stacks(self):
+        """CC-TLD + keywords should stack for higher confidence."""
+        signal = detect_ecommerce(
+            "https://www.cassias.co.il/table",
+            title="שולחן מתקפל - מחיר מבצע",
+        )
+        assert signal.is_ecommerce is True
+        assert signal.confidence > 0.4
+
+    def test_known_co_il_uses_known_domain(self):
+        """Known .co.il domains should get the higher known-domain score."""
+        signal = detect_ecommerce("https://ksp.co.il/web/cat/1234")
+        assert signal.is_ecommerce is True
+        assert signal.confidence >= 0.8
+        assert any("known_ecommerce" in s for s in signal.signals)
+        # Should NOT have the TLD signal (known domain takes precedence)
+        assert not any("commercial_tld" in s for s in signal.signals)
+
+    def test_co_uk_unknown_domain(self):
+        signal = detect_ecommerce("https://www.argos.co.uk/product/123")
+        assert signal.is_ecommerce is True
+        assert any("commercial_tld" in s for s in signal.signals)
+
+    def test_com_domain_no_tld_boost(self):
+        """.com domains should NOT get the CC-TLD boost."""
+        signal = detect_ecommerce("https://blog.example.com/post/123")
+        assert not any("commercial_tld" in s for s in signal.signals)
+
+    def test_ikea_global_recognized(self):
+        """ikea.com should be recognized as known e-commerce."""
+        signal = detect_ecommerce("https://www.ikea.com/il/he/cat/tables/")
+        assert signal.is_ecommerce is True
+        assert signal.confidence >= 0.8

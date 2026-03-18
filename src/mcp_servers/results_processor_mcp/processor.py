@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from urllib.parse import urlparse
 
+from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.shared.logging import get_logger
 from src.shared.models import ProductResult, Seller
 
@@ -211,9 +212,44 @@ def _merge_group(products: list[ProductResult]) -> ProductResult:
     )
 
 
+def _attribute_sort_key(
+    product: ProductResult,
+    attributes: list[QueryAttribute],
+) -> tuple[int, float]:
+    """Build a sort key based on how well a product matches user attributes.
+
+    Returns ``(missing_count, price)`` so products with more matching
+    criteria rank first, with price as tie-breaker.
+
+    For numeric criteria values:
+    - ``direction="low"``: lower values score better (fewer missing points)
+    - ``direction="high"``: higher values score better
+    Non-numeric criteria values count as present (0 missing points).
+    """
+    missing = 0
+    for attr in attributes:
+        key = attr.criterion_key
+        if key == "price":
+            # Price direction handled via price tie-break
+            continue
+        value = product.criteria.get(key)
+        if not value:
+            missing += 1
+
+    _, price = _best_price(product)
+    # If user wants low price, sort ascending (default). If high, invert.
+    price_wants_high = any(
+        a.criterion_key == "price" and a.direction == "high" for a in attributes
+    )
+    price_key = -price if price_wants_high else price
+
+    return (missing, price_key)
+
+
 def format_results(
     results: list[ProductResult],
     format_type: str = "single_product",
+    user_attributes: list[QueryAttribute] | None = None,
 ) -> dict:
     """Format results for display.
 
@@ -235,7 +271,10 @@ def format_results(
 
     capped = results[:_MAX_RESULTS]
 
-    if format_type == "price_comparison":
+    if user_attributes:
+        # Sort by attribute preference score when user intent is available
+        capped.sort(key=lambda p: _attribute_sort_key(p, user_attributes))
+    elif format_type == "price_comparison":
         capped.sort(key=lambda p: _best_price(p))
     elif format_type == "multi_product":
         capped.sort(key=lambda p: (p.category or "", p.brand or "", _best_price(p)))

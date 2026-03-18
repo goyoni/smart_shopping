@@ -15,10 +15,24 @@ _KNOWN_ECOMMERCE_DOMAINS: set[str] = {
     "ebay.com", "ebay.co.uk", "ebay.de",
     "aliexpress.com", "walmart.com", "target.com",
     "bestbuy.com", "newegg.com", "etsy.com",
+    "ikea.com",
     # Israel
     "zap.co.il", "ksp.co.il", "bug.co.il", "ivory.co.il",
     "lastprice.co.il", "wisebuy.co.il", "machsanei-hashmal.co.il",
-    "next.co.il", "shufersal.co.il",
+    "next.co.il", "shufersal.co.il", "homecenter.co.il",
+    "ace.co.il", "hamashbir.co.il", "terminal-x.com",
+    "mega.co.il", "rami-levy.co.il",
+    # Germany
+    "otto.de", "mediamarkt.de", "saturn.de",
+    # France
+    "fnac.com", "cdiscount.com", "darty.com",
+}
+
+# Country-code commercial TLDs that are *almost always* e-commerce or
+# business sites.  A site using one of these suffixes gets a moderate
+# confidence boost even if it is not in the known-domain list.
+_COMMERCIAL_CC_TLDS: set[str] = {
+    ".co.il", ".co.uk", ".com.au", ".com.br", ".co.jp",
 }
 
 _NON_ECOMMERCE_DOMAINS: set[str] = {
@@ -92,6 +106,14 @@ def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceS
             confidence += 0.8
             signals.append(f"known_ecommerce:{ec_domain}")
             break
+
+    # Commercial country-code TLD heuristic (e.g. .co.il, .co.uk)
+    if not signals:  # only if not already matched as known domain
+        for tld in _COMMERCIAL_CC_TLDS:
+            if domain.endswith(tld):
+                confidence += 0.4
+                signals.append(f"commercial_tld:{tld}")
+                break
 
     # URL path patterns
     path = urlparse(url).path.lower()

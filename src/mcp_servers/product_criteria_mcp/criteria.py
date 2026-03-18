@@ -32,6 +32,15 @@ class CriterionSpec:
         }
 
 
+@dataclass
+class QueryAttribute:
+    """A user-intent attribute extracted from a search query."""
+
+    criterion_key: str
+    direction: str  # "low" or "high"
+    display_label: str
+
+
 # ---------------------------------------------------------------------------
 # Category name normalization
 # ---------------------------------------------------------------------------
@@ -296,6 +305,71 @@ _ATTRIBUTE_PATTERNS: list[tuple[str, str]] = [
     (r"\binverter\b", "inverter"),
     (r"\bhepa\b", "filtration"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Query attribute map — maps user-intent keywords to criteria directions
+# ---------------------------------------------------------------------------
+
+_QUERY_ATTRIBUTE_MAP: dict[str, QueryAttribute] = {
+    # Noise
+    "low noise": QueryAttribute("noise_level", "low", "low noise"),
+    "quiet": QueryAttribute("noise_level", "low", "quiet"),
+    "silent": QueryAttribute("noise_level", "low", "silent"),
+    "שקט": QueryAttribute("noise_level", "low", "שקט"),
+    "هادئ": QueryAttribute("noise_level", "low", "هادئ"),
+    # Size / capacity
+    "large capacity": QueryAttribute("capacity", "high", "large capacity"),
+    "large": QueryAttribute("capacity", "high", "large"),
+    "big": QueryAttribute("capacity", "high", "big"),
+    "small": QueryAttribute("capacity", "low", "small"),
+    "compact": QueryAttribute("capacity", "low", "compact"),
+    "mini": QueryAttribute("capacity", "low", "mini"),
+    "גדול": QueryAttribute("capacity", "high", "גדול"),
+    "קטן": QueryAttribute("capacity", "low", "קטן"),
+    "كبير": QueryAttribute("capacity", "high", "كبير"),
+    "صغير": QueryAttribute("capacity", "low", "صغير"),
+    # Energy
+    "energy efficient": QueryAttribute("energy_rating", "high", "energy efficient"),
+    "eco": QueryAttribute("energy_rating", "high", "eco"),
+    "efficient": QueryAttribute("energy_rating", "high", "efficient"),
+    "חסכוני": QueryAttribute("energy_rating", "high", "חסכוני"),
+    # Weight
+    "lightweight": QueryAttribute("weight", "low", "lightweight"),
+    "light": QueryAttribute("weight", "low", "light"),
+    "portable": QueryAttribute("weight", "low", "portable"),
+    "קל": QueryAttribute("weight", "low", "קל"),
+    # Power
+    "powerful": QueryAttribute("power", "high", "powerful"),
+    "חזק": QueryAttribute("power", "high", "חזק"),
+    # Price
+    "cheap": QueryAttribute("price", "low", "cheap"),
+    "budget": QueryAttribute("price", "low", "budget"),
+    "affordable": QueryAttribute("price", "low", "affordable"),
+    "premium": QueryAttribute("price", "high", "premium"),
+    "זול": QueryAttribute("price", "low", "זול"),
+}
+
+
+def extract_query_attributes(query: str) -> list[QueryAttribute]:
+    """Extract user-intent attributes from a search query.
+
+    Scans the query text for keywords (longest-first to handle multi-word
+    phrases like "low noise" before "low") and returns matched attributes
+    with their preference direction.
+    """
+    text = query.lower().strip()
+    matched: list[QueryAttribute] = []
+    seen_keys: set[str] = set()
+
+    for keyword, attr in sorted(
+        _QUERY_ATTRIBUTE_MAP.items(), key=lambda x: -len(x[0])
+    ):
+        if keyword in text and attr.criterion_key not in seen_keys:
+            matched.append(attr)
+            seen_keys.add(attr.criterion_key)
+
+    return matched
 
 
 # ---------------------------------------------------------------------------
