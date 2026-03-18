@@ -410,11 +410,13 @@ Each agent works in separate branch tagged with name.
 - Success rate tracking per domain
 - Shopping list (add/remove)
 - Manual "Contact Seller" buttons
+- Price comparison - Search by multiple model ids for prices (e.g find a1234, b2345)
+- RTL support (Hebrew, Arabic)
+- Multi-language product search
+
 
 ### Phase 5: Polish & Deploy
-- RTL support (Hebrew, Arabic)
 - Mobile responsive design
-- Multi-language product search
 - Full test coverage (mock Playwright in tests)
 - Evaluation suite (test on 10+ real e-commerce sites)
 - Production deployment scripts
