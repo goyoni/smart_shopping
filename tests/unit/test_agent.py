@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.agents.main_agent import AgentState, MainAgent, extract_category, _build_locale
+from src.agents.main_agent import AgentState, MainAgent, extract_category, detect_model_ids, _build_locale
+from src.mcp_servers.results_processor_mcp.processor import format_results
 from src.mcp_servers.web_search_mcp.search import SearchResult
 from src.shared.models import ProductResult, SearchStatus, Seller
 
@@ -40,6 +41,32 @@ class TestExtractCategory:
 
     def test_case_insensitive(self):
         assert extract_category("Best LAPTOP for students") == "laptop"
+
+
+class TestDetectModelIds:
+    def test_comma_separated(self):
+        ids = detect_model_ids("find A1234, B5678")
+        assert ids == ["A1234", "B5678"]
+
+    def test_and_separated(self):
+        ids = detect_model_ids("compare WH-1000XM5 and AirPods-Pro2")
+        assert ids == ["WH-1000XM5", "AirPods-Pro2"]
+
+    def test_single_model_returns_empty(self):
+        ids = detect_model_ids("find A1234")
+        assert ids == []
+
+    def test_natural_language_returns_empty(self):
+        ids = detect_model_ids("quiet affordable refrigerator")
+        assert ids == []
+
+    def test_strips_prefix(self):
+        ids = detect_model_ids("search A123B, C456D")
+        assert ids == ["A123B", "C456D"]
+
+    def test_three_models(self):
+        ids = detect_model_ids("price check LG-X100, Samsung-Y200, Sony-Z300")
+        assert len(ids) == 3
 
 
 class TestBuildLocale:
@@ -330,3 +357,119 @@ async def test_pipeline_passes_criteria_to_scraper():
     # "refrigerator" is a known category, so criteria should be non-None
     assert scrape_kwargs.get("criteria") is not None
     assert isinstance(scrape_kwargs["criteria"], dict)
+
+
+# ---------------------------------------------------------------------------
+# Query attribute extraction in pipeline
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pipeline_extracts_query_attributes():
+    """Verify extract_query_attributes is called and attributes are used."""
+    mock_browser = AsyncMock()
+
+    mock_search_results = [
+        SearchResult(url="https://www.amazon.com/dp/B1", title="Quiet Fridge", snippet="low noise fridge"),
+    ]
+
+    mock_products = [
+        ProductResult(
+            name="Quiet Fridge",
+            model_id="QF-001",
+            brand="CoolBrand",
+            sellers=[Seller(name="amazon.com", price=599.99, currency="USD", url="https://www.amazon.com/dp/B1")],
+            criteria={"noise_level": "38 dB"},
+        ),
+    ]
+
+    search_kwargs: dict = {}
+
+    async def capture_search(query, language="en", market="us", *, refined_query=None, _max_attempts=2):
+        search_kwargs["refined_query"] = refined_query
+        return mock_search_results
+
+    format_kwargs: dict = {}
+    original_format = format_results
+
+    def capture_format(results, fmt="single_product", user_attributes=None):
+        format_kwargs["user_attributes"] = user_attributes
+        return original_format(results, fmt)
+
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+        patch("src.agents.main_agent.search_products", side_effect=capture_search),
+        patch("src.agents.main_agent.scrape_page", return_value=mock_products),
+        patch("src.agents.main_agent.format_results", side_effect=capture_format),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_get_browser.return_value = mock_ctx
+
+        agent = MainAgent(session_id="test-attrs")
+        state = await agent.process_query("quiet fridge for a large family", language="en", market="us")
+
+    assert state.status == SearchStatus.COMPLETED
+    # Refined query should have been built and passed
+    assert search_kwargs.get("refined_query") is not None
+    assert "refrigerator" in search_kwargs["refined_query"]
+    # user_attributes should have been passed to format_results
+    assert format_kwargs.get("user_attributes") is not None
+    attr_keys = {a.criterion_key for a in format_kwargs["user_attributes"]}
+    assert "noise_level" in attr_keys
+    assert "capacity" in attr_keys
+
+
+@pytest.mark.asyncio
+async def test_pipeline_boosts_criteria_importance():
+    """Verify that user attributes boost matching criteria importance."""
+    mock_browser = AsyncMock()
+
+    mock_search_results = [
+        SearchResult(url="https://www.amazon.com/dp/B1", title="Fridge", snippet=""),
+    ]
+
+    scrape_kwargs: dict = {}
+
+    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
+        scrape_kwargs["criteria"] = criteria
+        return []
+
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_get_browser.return_value = mock_ctx
+
+        agent = MainAgent(session_id="test-boost")
+        await agent.process_query("quiet refrigerator", language="en", market="us")
+
+    # noise_level importance should have been boosted to "high"
+    assert scrape_kwargs.get("criteria") is not None
+    assert scrape_kwargs["criteria"]["noise_level"]["importance"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_no_attributes_no_refined_query():
+    """When no attributes are found, search should use original query."""
+    search_kwargs: dict = {}
+
+    async def capture_search(query, language="en", market="us", *, refined_query=None, _max_attempts=2):
+        search_kwargs["refined_query"] = refined_query
+        return []
+
+    with (
+        patch("src.agents.main_agent.search_products", side_effect=capture_search),
+        patch("src.agents.main_agent.discover_criteria_via_llm", return_value={}),
+        patch("src.agents.main_agent.extract_query_attributes_via_llm", return_value=[]),
+        patch("src.agents.main_agent.get_cached", return_value=None),
+    ):
+        agent = MainAgent(session_id="test-no-attrs")
+        await agent.process_query("best deal on shoes")
+
+    # No category, no attributes → refined_query should be None
+    assert search_kwargs.get("refined_query") is None

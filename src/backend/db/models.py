@@ -40,6 +40,19 @@ class ScrapingInstruction(Base):
     )
 
 
+class ShoppingListItem(Base):
+    __tablename__ = "shopping_list"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_json: Mapped[str] = mapped_column(Text)
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ProductCriteriaCache(Base):
     __tablename__ = "product_criteria_cache"
 

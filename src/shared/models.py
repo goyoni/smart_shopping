@@ -52,6 +52,29 @@ class SearchResponse(BaseModel):
 
 
 class ShoppingListItem(BaseModel):
+    id: int | None = None
     product: ProductResult
     quantity: int = 1
     notes: str | None = None
+
+
+class ShoppingListResponse(BaseModel):
+    items: list[ShoppingListItem] = Field(default_factory=list)
+
+
+class AddToShoppingListRequest(BaseModel):
+    product: ProductResult
+    quantity: int = 1
+    notes: str | None = None
+
+
+class SearchHistoryItem(BaseModel):
+    session_id: str
+    query: str
+    status: str
+    result_count: int
+    created_at: str
+
+
+class SearchHistoryResponse(BaseModel):
+    items: list[SearchHistoryItem] = Field(default_factory=list)

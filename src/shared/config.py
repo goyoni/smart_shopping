@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str = ""
     phoenix_enabled: bool = True
     phoenix_port: int = 6006
+    llm_model: str = "gpt-4o-mini"
+    llm_api_key: str = ""
+    llm_temperature: float = 0.2
 
     model_config = {"env_file": "config/.env.local", "extra": "ignore"}
 

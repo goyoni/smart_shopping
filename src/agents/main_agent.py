@@ -6,13 +6,25 @@ and orchestrates the full search workflow.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from opentelemetry import trace
+from opentelemetry.trace import StatusCode
+
 from src.mcp_servers.product_criteria_mcp.criteria import (
+    extract_query_attributes,
     get_criteria,
     normalize_category,
     research_criteria,
+)
+from src.mcp_servers.product_criteria_mcp.db_cache import get_cached, save_cached
+from src.mcp_servers.product_criteria_mcp.llm_criteria import (
+    discover_criteria_via_llm,
+    extract_query_attributes_via_llm,
 )
 from src.mcp_servers.results_processor_mcp.processor import (
     aggregate_sellers,
@@ -20,16 +32,14 @@ from src.mcp_servers.results_processor_mcp.processor import (
     validate_results,
 )
 from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
-from src.mcp_servers.web_search_mcp.search import search_products
+from src.mcp_servers.web_search_mcp.search import (
+    build_refined_query,
+    search_products,
+)
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.shared.browser import get_browser
 from src.shared.logging import get_logger, get_tracer, set_session_id
 from src.shared.models import ProductResult, SearchStatus
-
-import json
-
-from opentelemetry import trace
-from opentelemetry.trace import StatusCode
 
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
@@ -106,6 +116,42 @@ def extract_category(query: str) -> str | None:
     return None
 
 
+def detect_model_ids(query: str) -> list[str]:
+    """Detect comma/space-separated model IDs in a query.
+
+    Returns a list of model ID strings, or an empty list if the query
+    is a natural-language search rather than a model-based lookup.
+
+    Model IDs are alphanumeric tokens containing both letters and digits
+    (e.g. 'A1234', 'WH-1000XM5', 'LG-GR-F501ELDZ').
+    """
+    # Strip common prefixes
+    cleaned = re.sub(
+        r"^(find|search|compare|look\s+up|price\s+(for|of|check))\s+",
+        "",
+        query.strip(),
+        flags=re.IGNORECASE,
+    )
+
+    # Split on comma, semicolon, " and ", or " vs "
+    parts = re.split(r"[,;]\s*|\s+(?:and|vs\.?)\s+", cleaned)
+    parts = [p.strip() for p in parts if p.strip()]
+
+    if len(parts) < 2:
+        return []
+
+    # Each part should look like a model ID (contains both letters and digits)
+    model_ids: list[str] = []
+    for part in parts:
+        token = part.strip()
+        has_letter = any(c.isalpha() for c in token)
+        has_digit = any(c.isdigit() for c in token)
+        if has_letter and has_digit and len(token) >= 3:
+            model_ids.append(token)
+
+    return model_ids if len(model_ids) >= 2 else []
+
+
 def _build_locale(language: str, market: str) -> str:
     """Build a browser locale string from language and market codes."""
     return f"{language}-{market.upper()}"
@@ -165,13 +211,40 @@ class MainAgent:
         ) as root_span:
             root_span.add_event("process_query.start", {"query": query, "market": market})
             try:
+                    # Check for multi-model price search (e.g. "find A1234, B2345")
+                    model_ids = detect_model_ids(query)
+                    if model_ids:
+                        root_span.set_attribute("search_type", "multi_model")
+                        root_span.set_attribute("model_ids", json.dumps(model_ids))
+                        await self._add_status(f"Searching prices for {len(model_ids)} models...")
+                        state = await self._process_multi_model(
+                            model_ids, language, market, root_span,
+                        )
+                        return state
+
                     # Step 1: Extract product category
                     category = extract_category(query)
                     if category:
                         root_span.set_attribute("category", category)
 
+                    # Step 1.5: Extract user-intent attributes from query
+                    attributes = extract_query_attributes(query)
+
+                    if attributes:
+                        root_span.set_attribute(
+                            "query_attributes",
+                            json.dumps(
+                                [
+                                    {"key": a.criterion_key, "direction": a.direction, "label": a.display_label}
+                                    for a in attributes
+                                ],
+                                ensure_ascii=False,
+                            ),
+                        )
+
                     # Step 2: Get criteria for the category
                     criteria: dict[str, dict] = {}
+                    cache_key = category if category else normalize_category(query)
                     if category:
                         await self._add_status(f"Looking up criteria for {category}...")
                         with _tracer.start_as_current_span(
@@ -184,14 +257,44 @@ class MainAgent:
                                 json.dumps(list(criteria.keys())),
                             )
 
-                    # Step 3: Web search (direct HTTP — no browser needed)
+                    # LLM fallback for unknown categories
+                    if not criteria:
+                        cached = await get_cached(cache_key)
+                        if cached:
+                            criteria = cached
+                            root_span.set_attribute("criteria_source", "cache")
+                        else:
+                            criteria = await discover_criteria_via_llm(cache_key)
+                            if criteria:
+                                await save_cached(cache_key, criteria)
+                                root_span.set_attribute("criteria_source", "llm")
+
+                    # LLM fallback for attribute extraction on unknown categories
+                    if not attributes and criteria and not category:
+                        attributes = await extract_query_attributes_via_llm(query, criteria)
+
+                    # Step 2.5: Boost importance of criteria matching user attributes
+                    if attributes and criteria:
+                        for attr in attributes:
+                            if attr.criterion_key in criteria:
+                                criteria[attr.criterion_key] = {
+                                    **criteria[attr.criterion_key],
+                                    "importance": "high",
+                                }
+
+                    # Step 3: Web search (HTTP-based, no browser)
                     await self._add_status("Searching the web...")
+                    refined = None
+                    if attributes or category:
+                        refined = build_refined_query(query, category, attributes)
                     with _tracer.start_as_current_span(
                         "search_web",
                         attributes={"query": query, "language": language, "market": market},
                     ) as search_span:
+                        if refined:
+                            search_span.set_attribute("refined_query", refined)
                         search_span.add_event("search_web.start", {"query": query, "language": language, "market": market})
-                        search_results = await search_products(query, language, market)
+                        search_results = await search_products(query, language, market, refined_query=refined)
                         search_span.set_attribute("result_count", len(search_results))
                         if search_results:
                             search_span.set_attribute(
@@ -208,6 +311,14 @@ class MainAgent:
                         snippets = [r.snippet for r in search_results if r.snippet]
                         if snippets:
                             criteria = research_criteria(snippets, criteria)
+
+                    # LLM enrichment from snippets when criteria is still empty
+                    if not criteria and search_results:
+                        snippets = [r.snippet for r in search_results if r.snippet]
+                        if snippets:
+                            criteria = await discover_criteria_via_llm(cache_key, snippets=snippets)
+                            if criteria:
+                                await save_cached(cache_key, criteria)
 
                     if not search_results:
                         root_span.set_attribute("exit_reason", "no_search_results")
@@ -315,7 +426,11 @@ class MainAgent:
 
                     # Step 8: Format results (sort and cap)
                     if all_products:
-                        formatted = format_results(all_products, "single_product")
+                        formatted = format_results(
+                            all_products,
+                            "single_product",
+                            user_attributes=attributes if attributes else None,
+                        )
                         # Extract sorted products from formatted output
                         all_products = [
                             ProductResult(**item["product"])
@@ -354,6 +469,70 @@ class MainAgent:
 
         self.state.status = SearchStatus.COMPLETED
         await self._add_status("Search complete")
+        return self.state
+
+    async def _process_multi_model(
+        self,
+        model_ids: list[str],
+        language: str,
+        market: str,
+        root_span: object,
+    ) -> AgentState:
+        """Search for multiple model IDs in parallel for price comparison."""
+        locale = _build_locale(language, market)
+
+        async def search_single_model(model_id: str) -> list[ProductResult]:
+            await self._add_status(f"Searching for {model_id}...")
+            results = await search_products(model_id, language, market)
+            ecom_data = [
+                {"url": r.url, "title": r.title, "snippet": r.snippet}
+                for r in results
+            ]
+            ecom_signals = identify_ecommerce_sites(ecom_data)
+            if not ecom_signals:
+                return []
+
+            sites = ecom_signals[:_MAX_SITES_TO_SCRAPE]
+            products: list[ProductResult] = []
+            async with get_browser() as browser:
+                for signal in sites:
+                    try:
+                        scraped = await scrape_page(
+                            browser, signal.url, model_id, locale=locale,
+                        )
+                        for p in scraped:
+                            p.product_type = model_id
+                        products.extend(scraped)
+                    except Exception:
+                        logger.warning("Failed to scrape %s for model %s", signal.url, model_id)
+                        continue
+
+            return aggregate_sellers(products) if products else []
+
+        # Run searches in parallel
+        tasks = [search_single_model(mid) for mid in model_ids]
+        results_per_model = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_products: list[ProductResult] = []
+        for mid, result in zip(model_ids, results_per_model):
+            if isinstance(result, Exception):
+                logger.warning("Multi-model search failed for %s: %s", mid, result)
+                continue
+            all_products.extend(result)
+
+        # Format as price comparison
+        if all_products:
+            formatted = format_results(all_products, "price_comparison")
+            all_products = [
+                ProductResult(**item["product"])
+                for item in formatted["products"]
+            ]
+
+        self.state.results = all_products
+        self.state.status = SearchStatus.COMPLETED
+        await self._add_status(
+            f"Found {len(all_products)} products for {len(model_ids)} models"
+        )
         return self.state
 
     async def refine_search(self, refinement: str) -> AgentState:
