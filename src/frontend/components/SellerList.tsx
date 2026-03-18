@@ -74,16 +74,106 @@ export default function SellerList({ sellers }: SellerListProps) {
               </span>
             )}
           </div>
-          <span
-            style={{
-              fontWeight: 600,
-              color: seller.price != null ? "#16a34a" : "#999",
-            }}
-          >
-            {formatPrice(seller.price, seller.currency)}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <span
+              style={{
+                fontWeight: 600,
+                color: seller.price != null ? "#16a34a" : "#999",
+              }}
+            >
+              {formatPrice(seller.price, seller.currency)}
+            </span>
+            {(seller.phone || seller.email || seller.url) && (
+              <ContactButton seller={seller} />
+            )}
+          </div>
         </li>
       ))}
     </ul>
+  );
+}
+
+function ContactButton({ seller }: { seller: Seller }) {
+  if (seller.phone) {
+    const phone = seller.phone.replace(/[^+\d]/g, "");
+    const message = encodeURIComponent(
+      `Hi, I'm interested in a product I saw on your site. Is it available?`
+    );
+    return (
+      <a
+        href={`https://wa.me/${phone}?text=${message}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        title="Contact via WhatsApp"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 28,
+          height: 28,
+          borderRadius: 4,
+          background: "#25d366",
+          color: "#fff",
+          fontSize: "0.75rem",
+          textDecoration: "none",
+          flexShrink: 0,
+        }}
+      >
+        WA
+      </a>
+    );
+  }
+
+  if (seller.email) {
+    const subject = encodeURIComponent("Product inquiry");
+    const body = encodeURIComponent(
+      "Hi, I'm interested in a product listed on your site. Could you provide more details?"
+    );
+    return (
+      <a
+        href={`mailto:${seller.email}?subject=${subject}&body=${body}`}
+        title="Contact via Email"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 28,
+          height: 28,
+          borderRadius: 4,
+          background: "#2563eb",
+          color: "#fff",
+          fontSize: "0.7rem",
+          textDecoration: "none",
+          flexShrink: 0,
+        }}
+      >
+        @
+      </a>
+    );
+  }
+
+  // Fallback: link to seller site
+  return (
+    <a
+      href={seller.url!}
+      target="_blank"
+      rel="noopener noreferrer"
+      title="Visit seller"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 28,
+        height: 28,
+        borderRadius: 4,
+        background: "#e5e7eb",
+        color: "#374151",
+        fontSize: "0.7rem",
+        textDecoration: "none",
+        flexShrink: 0,
+      }}
+    >
+      Go
+    </a>
   );
 }

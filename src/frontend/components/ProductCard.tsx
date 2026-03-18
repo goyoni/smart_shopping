@@ -26,6 +26,7 @@ export interface ProductResultData {
 
 interface ProductCardProps {
   product: ProductResultData;
+  onAddToList?: (product: ProductResultData) => void;
 }
 
 const currencySymbols: Record<string, string> = {
@@ -93,7 +94,7 @@ function getProductUrl(sellers: Seller[]): string | null {
   return null;
 }
 
-export default function ProductCard({ product }: ProductCardProps) {
+export default function ProductCard({ product, onAddToList }: ProductCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [criteriaExpanded, setCriteriaExpanded] = useState(false);
 
@@ -283,6 +284,26 @@ export default function ProductCard({ product }: ProductCardProps) {
               </span>
             ))}
           </div>
+        )}
+
+        {/* Add to Shopping List */}
+        {onAddToList && (
+          <button
+            onClick={() => onAddToList(product)}
+            style={{
+              marginTop: "0.5rem",
+              width: "100%",
+              padding: "0.35rem",
+              border: "1px solid #d1d5db",
+              borderRadius: 4,
+              background: "#f9fafb",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              color: "#374151",
+            }}
+          >
+            + Add to list
+          </button>
         )}
       </div>
     </div>

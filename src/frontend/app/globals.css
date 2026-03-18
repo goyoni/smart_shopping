@@ -14,3 +14,14 @@ body {
 [dir="rtl"] {
   text-align: right;
 }
+
+[dir="rtl"] input,
+[dir="rtl"] select,
+[dir="rtl"] textarea {
+  text-align: right;
+}
+
+/* Use logical properties for directional spacing */
+[dir="rtl"] ul {
+  padding-inline-start: 0;
+}

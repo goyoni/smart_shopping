@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import TabNav from "../components/TabNav";
+import { LocaleProvider } from "../lib/LocaleContext";
 
 export const metadata: Metadata = {
   title: "Smart Shopping Agent",
@@ -13,7 +15,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <LocaleProvider>
+          <TabNav />
+          {children}
+        </LocaleProvider>
+      </body>
     </html>
   );
 }
