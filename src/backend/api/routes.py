@@ -17,6 +17,7 @@ from src.shared.geo import detect_market, get_client_ip
 from src.shared.logging import set_session_id
 from src.shared.models import (
     AddToShoppingListRequest,
+    CrossSeller,
     ProductResult,
     SearchHistoryItem,
     SearchHistoryResponse,
@@ -58,11 +59,17 @@ async def search(request: SearchRequest, raw_request: Request) -> SearchResponse
     )
 
     async with async_session() as session:
+        cross_sellers_data = (
+            json.dumps([c.model_dump() for c in state.cross_sellers])
+            if state.cross_sellers
+            else None
+        )
         record = SearchHistory(
             session_id=session_id,
             query=request.query,
             status=state.status.value,
             results_json=json.dumps([r.model_dump() for r in state.results]),
+            cross_sellers_json=cross_sellers_data,
             language=request.language,
         )
         session.add(record)
@@ -72,6 +79,7 @@ async def search(request: SearchRequest, raw_request: Request) -> SearchResponse
         session_id=session_id,
         status=state.status,
         results=state.results,
+        cross_sellers=state.cross_sellers,
         status_message=state.status_messages[-1] if state.status_messages else "",
     )
 
@@ -180,10 +188,20 @@ async def get_search_results(session_id: str) -> SearchResponse:
         except (json.JSONDecodeError, TypeError):
             pass
 
+    cross_sellers: list[CrossSeller] = []
+    cross_json = getattr(record, "cross_sellers_json", None)
+    if cross_json:
+        try:
+            raw_cs = json.loads(cross_json)
+            cross_sellers = [CrossSeller(**item) for item in raw_cs]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return SearchResponse(
         session_id=record.session_id,
         status=SearchStatus(record.status),
         results=results,
+        cross_sellers=cross_sellers,
         status_message="",
     )
 

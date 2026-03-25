@@ -30,8 +30,22 @@ async def get_session() -> AsyncSession:  # type: ignore[misc]
 
 
 async def init_db() -> None:
-    """Create all database tables."""
+    """Create all database tables and apply lightweight migrations."""
+    from sqlalchemy import inspect, text
+
     from src.backend.db.models import Base
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Add cross_sellers_json column if missing (migration for existing DBs)
+        def _migrate(sync_conn):  # type: ignore[no-untyped-def]
+            insp = inspect(sync_conn)
+            if insp.has_table("search_history"):
+                cols = {c["name"] for c in insp.get_columns("search_history")}
+                if "cross_sellers_json" not in cols:
+                    sync_conn.execute(
+                        text("ALTER TABLE search_history ADD COLUMN cross_sellers_json TEXT")
+                    )
+
+        await conn.run_sync(_migrate)

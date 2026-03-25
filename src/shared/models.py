@@ -37,6 +37,20 @@ class ProductResult(BaseModel):
     image_url: str | None = None
 
 
+class CrossSeller(BaseModel):
+    """A seller that carries multiple products from a multi-model search."""
+
+    name: str
+    domain: str
+    url: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    products: list[str] = Field(default_factory=list)
+    prices: dict[str, float] = Field(default_factory=dict)
+    total_price: float | None = None
+    currency: str = "USD"
+
+
 class SearchRequest(BaseModel):
     query: str
     session_id: str | None = None
@@ -48,6 +62,7 @@ class SearchResponse(BaseModel):
     session_id: str
     status: SearchStatus
     results: list[ProductResult] = Field(default_factory=list)
+    cross_sellers: list[CrossSeller] = Field(default_factory=list)
     status_message: str = ""
 
 

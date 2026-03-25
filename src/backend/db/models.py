@@ -20,6 +20,7 @@ class SearchHistory(Base):
     query: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     results_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cross_sellers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(String(10), default="en")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -61,3 +62,21 @@ class ProductCriteriaCache(Base):
     criteria_json: Mapped[str] = mapped_column(Text)
     cache_key: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AggregatorSite(Base):
+    """A marketplace or price-comparison site for a specific market/category."""
+
+    __tablename__ = "aggregator_sites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    url_template: Mapped[str] = mapped_column(Text)
+    market: Mapped[str] = mapped_column(String(10), index=True)
+    categories_json: Mapped[str] = mapped_column(Text, default="[]")
+    source: Mapped[str] = mapped_column(String(20), default="default")
+    success_rate: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
