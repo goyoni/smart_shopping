@@ -52,12 +52,20 @@ class TestDetectModelIds:
         ids = detect_model_ids("compare WH-1000XM5 and AirPods-Pro2")
         assert ids == ["WH-1000XM5", "AirPods-Pro2"]
 
-    def test_single_model_returns_empty(self):
+    def test_single_model_returns_list(self):
         ids = detect_model_ids("find A1234")
-        assert ids == []
+        assert ids == ["A1234"]
+
+    def test_single_model_bare(self):
+        ids = detect_model_ids("BFL523MB1F")
+        assert ids == ["BFL523MB1F"]
 
     def test_natural_language_returns_empty(self):
         ids = detect_model_ids("quiet affordable refrigerator")
+        assert ids == []
+
+    def test_mixed_model_and_text_returns_empty(self):
+        ids = detect_model_ids("find A1234 in black color")
         assert ids == []
 
     def test_strips_prefix(self):

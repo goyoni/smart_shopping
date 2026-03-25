@@ -7,6 +7,8 @@ import pytest
 from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.mcp_servers.results_processor_mcp.processor import (
     aggregate_sellers,
+    find_cross_sellers,
+    find_missing_models,
     format_results,
     validate_results,
 )
@@ -291,3 +293,225 @@ class TestAttributeWeightedSorting:
         ]
         result = format_results(products, "single_product", user_attributes=[])
         assert result["products"][0]["best_price"] == 10
+
+
+# ---------------------------------------------------------------------------
+# find_cross_sellers
+# ---------------------------------------------------------------------------
+
+
+def _multi_model_product(
+    name: str,
+    product_type: str,
+    sellers: list[Seller],
+) -> ProductResult:
+    return ProductResult(
+        name=name,
+        model_id=name,
+        product_type=product_type,
+        sellers=sellers,
+    )
+
+
+class TestFindCrossSellers:
+    def test_finds_seller_with_multiple_models(self):
+        products = [
+            _multi_model_product(
+                "Bosch Oven HBG578",
+                "HBG578",
+                [
+                    Seller(name="megashop.com", price=500, currency="USD", url="https://megashop.com/oven"),
+                    Seller(name="other.com", price=550, currency="USD", url="https://other.com/oven"),
+                ],
+            ),
+            _multi_model_product(
+                "Bosch Dishwasher SMV4",
+                "SMV4HAX21E",
+                [
+                    Seller(name="megashop.com", price=400, currency="USD", url="https://megashop.com/dw"),
+                    Seller(name="another.com", price=450, currency="USD", url="https://another.com/dw"),
+                ],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert len(cross) == 1
+        assert cross[0].domain == "megashop.com"
+        assert set(cross[0].products) == {"HBG578", "SMV4HAX21E"}
+        assert cross[0].total_price == 900.0
+        assert cross[0].prices["HBG578"] == 500
+        assert cross[0].prices["SMV4HAX21E"] == 400
+
+    def test_no_cross_sellers_when_no_overlap(self):
+        products = [
+            _multi_model_product(
+                "Product A",
+                "ModelA",
+                [Seller(name="shopA.com", price=100, url="https://shopA.com/a")],
+            ),
+            _multi_model_product(
+                "Product B",
+                "ModelB",
+                [Seller(name="shopB.com", price=200, url="https://shopB.com/b")],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert len(cross) == 0
+
+    def test_no_cross_sellers_with_single_model(self):
+        products = [
+            _multi_model_product(
+                "Product A",
+                "ModelA",
+                [
+                    Seller(name="shop.com", price=100, url="https://shop.com/a"),
+                    Seller(name="shop.com", price=110, url="https://shop.com/a2"),
+                ],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert len(cross) == 0
+
+    def test_sorted_by_product_count_then_price(self):
+        products = [
+            _multi_model_product(
+                "A", "ModelA",
+                [
+                    Seller(name="big.com", price=100, url="https://big.com/a"),
+                    Seller(name="small.com", price=90, url="https://small.com/a"),
+                ],
+            ),
+            _multi_model_product(
+                "B", "ModelB",
+                [
+                    Seller(name="big.com", price=200, url="https://big.com/b"),
+                    Seller(name="small.com", price=180, url="https://small.com/b"),
+                ],
+            ),
+            _multi_model_product(
+                "C", "ModelC",
+                [
+                    Seller(name="big.com", price=300, url="https://big.com/c"),
+                ],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        # big.com carries 3 models, small.com carries 2
+        assert len(cross) == 2
+        assert cross[0].domain == "big.com"
+        assert len(cross[0].products) == 3
+        assert cross[1].domain == "small.com"
+        assert len(cross[1].products) == 2
+
+    def test_picks_best_price_per_model(self):
+        products = [
+            _multi_model_product(
+                "A", "ModelA",
+                [
+                    Seller(name="shop.com", price=150, url="https://shop.com/a1"),
+                    Seller(name="shop.com", price=100, url="https://shop.com/a2"),
+                ],
+            ),
+            _multi_model_product(
+                "B", "ModelB",
+                [
+                    Seller(name="shop.com", price=200, url="https://shop.com/b"),
+                ],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert len(cross) == 1
+        assert cross[0].prices["ModelA"] == 100  # Best price
+        assert cross[0].total_price == 300
+
+    def test_total_price_none_when_missing_prices(self):
+        products = [
+            _multi_model_product(
+                "A", "ModelA",
+                [Seller(name="shop.com", price=100, url="https://shop.com/a")],
+            ),
+            _multi_model_product(
+                "B", "ModelB",
+                [Seller(name="shop.com", price=None, url="https://shop.com/b")],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert len(cross) == 1
+        assert cross[0].total_price is None
+
+    def test_contact_info_propagated(self):
+        products = [
+            _multi_model_product(
+                "A", "ModelA",
+                [Seller(name="shop.com", price=100, url="https://shop.com/a", phone="+1234567890")],
+            ),
+            _multi_model_product(
+                "B", "ModelB",
+                [Seller(name="shop.com", price=200, url="https://shop.com/b", email="sales@shop.com")],
+            ),
+        ]
+        cross = find_cross_sellers(products)
+        assert cross[0].phone == "+1234567890"
+        assert cross[0].email == "sales@shop.com"
+
+
+# ---------------------------------------------------------------------------
+# find_missing_models
+# ---------------------------------------------------------------------------
+
+
+class TestFindMissingModels:
+    def test_finds_missing_models(self):
+        products = [
+            _multi_model_product(
+                "Fridge M1", "M1",
+                [
+                    Seller(name="seller1.com", price=2000, url="https://seller1.com/m1"),
+                    Seller(name="seller2.com", price=2050, url="https://seller2.com/m1"),
+                ],
+            ),
+            _multi_model_product(
+                "Oven M2", "M2",
+                [
+                    Seller(name="seller1.com", price=1500, url="https://seller1.com/m2"),
+                    Seller(name="seller3.com", price=1900, url="https://seller3.com/m2"),
+                ],
+            ),
+        ]
+        missing = find_missing_models(products, ["M1", "M2"])
+        # seller2 has M1 but not M2
+        assert "seller2.com" in missing
+        assert missing["seller2.com"] == ["M2"]
+        # seller3 has M2 but not M1
+        assert "seller3.com" in missing
+        assert missing["seller3.com"] == ["M1"]
+        # seller1 has both — should not be in missing
+        assert "seller1.com" not in missing
+
+    def test_no_missing_when_all_complete(self):
+        products = [
+            _multi_model_product(
+                "A", "M1",
+                [Seller(name="shop.com", price=100, url="https://shop.com/a")],
+            ),
+            _multi_model_product(
+                "B", "M2",
+                [Seller(name="shop.com", price=200, url="https://shop.com/b")],
+            ),
+        ]
+        missing = find_missing_models(products, ["M1", "M2"])
+        assert missing == {}
+
+    def test_empty_products(self):
+        missing = find_missing_models([], ["M1", "M2"])
+        assert missing == {}
+
+    def test_case_insensitive(self):
+        products = [
+            _multi_model_product(
+                "A", "m1",
+                [Seller(name="shop.com", price=100, url="https://shop.com/a")],
+            ),
+        ]
+        missing = find_missing_models(products, ["M1", "M2"])
+        assert "shop.com" in missing
+        assert missing["shop.com"] == ["M2"]
