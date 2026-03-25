@@ -28,18 +28,23 @@ from src.mcp_servers.product_criteria_mcp.llm_criteria import (
 )
 from src.mcp_servers.results_processor_mcp.processor import (
     aggregate_sellers,
+    find_cross_sellers,
+    find_missing_models,
     format_results,
     validate_results,
 )
 from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
 from src.mcp_servers.web_search_mcp.search import (
     build_refined_query,
+    discover_aggregators,
+    get_aggregator_urls,
+    search_on_site,
     search_products,
 )
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.shared.browser import get_browser
 from src.shared.logging import get_logger, get_tracer, set_session_id
-from src.shared.models import ProductResult, SearchStatus
+from src.shared.models import CrossSeller, ProductResult, SearchStatus
 
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
@@ -124,6 +129,9 @@ def detect_model_ids(query: str) -> list[str]:
 
     Model IDs are alphanumeric tokens containing both letters and digits
     (e.g. 'A1234', 'WH-1000XM5', 'LG-GR-F501ELDZ').
+
+    Works with single model IDs (e.g. "BFL523MB1F") as well as
+    multiple (e.g. "BFL523MB1F, HBG578EB3").
     """
     # Strip common prefixes
     cleaned = re.sub(
@@ -137,19 +145,28 @@ def detect_model_ids(query: str) -> list[str]:
     parts = re.split(r"[,;]\s*|\s+(?:and|vs\.?)\s+", cleaned)
     parts = [p.strip() for p in parts if p.strip()]
 
-    if len(parts) < 2:
-        return []
-
-    # Each part should look like a model ID (contains both letters and digits)
+    # Each part should look like a model ID: alphanumeric token with both
+    # letters and digits, no spaces (model IDs are single tokens like
+    # "BFL523MB1F" or "WH-1000XM5", not phrases).
     model_ids: list[str] = []
     for part in parts:
         token = part.strip()
+        # Model IDs don't contain spaces (except hyphens/underscores)
+        if " " in token:
+            # Multi-word part → not a model ID
+            continue
         has_letter = any(c.isalpha() for c in token)
         has_digit = any(c.isdigit() for c in token)
         if has_letter and has_digit and len(token) >= 3:
             model_ids.append(token)
 
-    return model_ids if len(model_ids) >= 2 else []
+    # Accept single model IDs too — if all parts parsed as model IDs
+    if not model_ids:
+        return []
+    # If there's extra non-model text, it's a natural language query
+    if len(model_ids) < len(parts):
+        return []
+    return model_ids
 
 
 def _build_locale(language: str, market: str) -> str:
@@ -166,6 +183,7 @@ class AgentState:
     query: str = ""
     language: str = "en"
     results: list[ProductResult] = field(default_factory=list)
+    cross_sellers: list[CrossSeller] = field(default_factory=list)
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     status_messages: list[str] = field(default_factory=list)
 
@@ -211,12 +229,13 @@ class MainAgent:
         ) as root_span:
             root_span.add_event("process_query.start", {"query": query, "market": market})
             try:
-                    # Check for multi-model price search (e.g. "find A1234, B2345")
+                    # Check for model-based price search (e.g. "BFL523MB1F" or "A1234, B2345")
                     model_ids = detect_model_ids(query)
                     if model_ids:
-                        root_span.set_attribute("search_type", "multi_model")
+                        search_type = "multi_model" if len(model_ids) > 1 else "single_model_price"
+                        root_span.set_attribute("search_type", search_type)
                         root_span.set_attribute("model_ids", json.dumps(model_ids))
-                        await self._add_status(f"Searching prices for {len(model_ids)} models...")
+                        await self._add_status(f"Searching prices for {len(model_ids)} model(s)...")
                         state = await self._process_multi_model(
                             model_ids, language, market, root_span,
                         )
@@ -478,10 +497,51 @@ class MainAgent:
         market: str,
         root_span: object,
     ) -> AgentState:
-        """Search for multiple model IDs in parallel for price comparison."""
+        """Search for multiple model IDs in parallel for price comparison.
+
+        Flow (per price_search.md):
+        1. For each model, search via web + market aggregators in parallel
+        2. Scrape all found URLs for prices and seller info
+        3. Build seller→model→price map, find missing models per seller
+        4. For sellers with missing models, search that seller's site directly
+        5. Re-aggregate and return results with cross-seller bundles
+        """
         locale = _build_locale(language, market)
 
-        async def search_single_model(model_id: str) -> list[ProductResult]:
+        async def _scrape_urls(
+            browser: object,
+            urls: list[str],
+            model_id: str,
+        ) -> list[ProductResult]:
+            """Scrape a list of URLs and return products relevant to model_id."""
+            products: list[ProductResult] = []
+            mid_lower = model_id.lower()
+            for url in urls:
+                try:
+                    scraped = await scrape_page(
+                        browser, url, model_id, locale=locale,
+                    )
+                    relevant = [
+                        p for p in scraped
+                        if mid_lower in p.name.lower()
+                        or (p.model_id and mid_lower in p.model_id.lower())
+                    ]
+                    for p in relevant:
+                        p.product_type = model_id
+                    products.extend(relevant)
+                except Exception:
+                    logger.warning("Failed to scrape %s for model %s", url, model_id)
+                    continue
+            return products
+
+        # Try to detect category from query context for aggregator filtering
+        category = extract_category(self.state.query)
+
+        # ------------------------------------------------------------------
+        # Phase 1: Search for each model (web search + aggregators)
+        # ------------------------------------------------------------------
+        async def search_single_model(model_id: str) -> list[str]:
+            """Return a list of URLs to scrape for a given model ID."""
             await self._add_status(f"Searching for {model_id}...")
             results = await search_products(model_id, language, market)
             ecom_data = [
@@ -489,38 +549,102 @@ class MainAgent:
                 for r in results
             ]
             ecom_signals = identify_ecommerce_sites(ecom_data)
-            if not ecom_signals:
-                return []
 
-            sites = ecom_signals[:_MAX_SITES_TO_SCRAPE]
-            products: list[ProductResult] = []
-            async with get_browser() as browser:
-                for signal in sites:
-                    try:
-                        scraped = await scrape_page(
-                            browser, signal.url, model_id, locale=locale,
-                        )
-                        for p in scraped:
-                            p.product_type = model_id
-                        products.extend(scraped)
-                    except Exception:
-                        logger.warning("Failed to scrape %s for model %s", signal.url, model_id)
-                        continue
+            urls = [s.url for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]]
 
-            return aggregate_sellers(products) if products else []
+            # Add aggregator direct URLs from DB (filtered by market + category)
+            aggregator_entries = await get_aggregator_urls(model_id, market, category)
+            seen_domains = {s.domain for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]}
+            for entry in aggregator_entries:
+                if entry["domain"] not in seen_domains:
+                    urls.append(entry["url"])
+                    seen_domains.add(entry["domain"])
 
-        # Run searches in parallel
-        tasks = [search_single_model(mid) for mid in model_ids]
-        results_per_model = await asyncio.gather(*tasks, return_exceptions=True)
+            return urls
 
+        # Discover new aggregators for this market+category (async, non-blocking)
+        if category:
+            asyncio.ensure_future(discover_aggregators(market, category))
+
+        # Run web searches in parallel for all models
+        search_tasks = [search_single_model(mid) for mid in model_ids]
+        urls_per_model = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+        # ------------------------------------------------------------------
+        # Phase 2: Scrape all URLs in parallel per model
+        # ------------------------------------------------------------------
+        await self._add_status("Scraping product pages...")
         all_products: list[ProductResult] = []
-        for mid, result in zip(model_ids, results_per_model):
-            if isinstance(result, Exception):
-                logger.warning("Multi-model search failed for %s: %s", mid, result)
-                continue
-            all_products.extend(result)
 
-        # Format as price comparison
+        async with get_browser() as browser:
+            scrape_tasks = []
+            scrape_model_ids = []
+            for mid, urls_result in zip(model_ids, urls_per_model):
+                if isinstance(urls_result, Exception):
+                    logger.warning("Search failed for %s: %s", mid, urls_result)
+                    continue
+                if urls_result:
+                    scrape_tasks.append(_scrape_urls(browser, urls_result, mid))
+                    scrape_model_ids.append(mid)
+
+            if scrape_tasks:
+                scrape_results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
+                for mid, result in zip(scrape_model_ids, scrape_results):
+                    if isinstance(result, Exception):
+                        logger.warning("Scrape failed for %s: %s", mid, result)
+                        continue
+                    all_products.extend(result)
+
+            # Aggregate sellers (merge same product from different sites)
+            if all_products:
+                all_products = aggregate_sellers(all_products)
+
+            # ------------------------------------------------------------------
+            # Phase 3: Fill missing models per seller (cross-seller filling)
+            # ------------------------------------------------------------------
+            if len(model_ids) > 1 and all_products:
+                missing = find_missing_models(all_products, model_ids)
+                if missing:
+                    fill_count = sum(len(v) for v in missing.values())
+                    await self._add_status(
+                        f"Checking {len(missing)} sellers for {fill_count} missing models..."
+                    )
+
+                    fill_tasks = []
+                    fill_meta: list[tuple[str, str]] = []  # (domain, model_id)
+
+                    for domain, missing_ids in missing.items():
+                        for mid in missing_ids:
+                            fill_tasks.append(
+                                search_on_site(mid, domain, language, market)
+                            )
+                            fill_meta.append((domain, mid))
+
+                    fill_results = await asyncio.gather(*fill_tasks, return_exceptions=True)
+
+                    # Scrape any URLs found on seller sites
+                    for (domain, mid), result in zip(fill_meta, fill_results):
+                        if isinstance(result, Exception):
+                            logger.warning("Site search failed for %s on %s: %s", mid, domain, result)
+                            continue
+                        if not result:
+                            continue
+
+                        urls_to_scrape = [r.url for r in result[:3]]
+                        filled = await _scrape_urls(browser, urls_to_scrape, mid)
+                        all_products.extend(filled)
+
+                    # Re-aggregate after filling
+                    if all_products:
+                        all_products = aggregate_sellers(all_products)
+
+        # ------------------------------------------------------------------
+        # Compute cross-sellers and format
+        # ------------------------------------------------------------------
+        cross_sellers: list[CrossSeller] = []
+        if all_products:
+            cross_sellers = find_cross_sellers(all_products)
+
         if all_products:
             formatted = format_results(all_products, "price_comparison")
             all_products = [
@@ -529,9 +653,14 @@ class MainAgent:
             ]
 
         self.state.results = all_products
+        self.state.cross_sellers = cross_sellers
         self.state.status = SearchStatus.COMPLETED
+
+        cross_msg = ""
+        if cross_sellers:
+            cross_msg = f", {len(cross_sellers)} sellers carry multiple items"
         await self._add_status(
-            f"Found {len(all_products)} products for {len(model_ids)} models"
+            f"Found {len(all_products)} products for {len(model_ids)} models{cross_msg}"
         )
         return self.state
 
