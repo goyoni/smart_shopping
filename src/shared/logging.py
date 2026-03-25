@@ -221,3 +221,169 @@ def get_tracer(name: str) -> trace.Tracer:
     """Return an OpenTelemetry tracer, ensuring the provider is initialised."""
     _init_tracer_provider()
     return trace.get_tracer(name)
+
+
+# ---------------------------------------------------------------------------
+# Agentic span helpers
+# ---------------------------------------------------------------------------
+
+import contextlib
+from collections.abc import Generator
+from typing import Any
+
+
+@contextlib.contextmanager
+def agent_span(
+    tracer: trace.Tracer,
+    agent_name: str,
+    *,
+    input: str = "",
+    system_prompt: str = "",
+    user_prompt: str = "",
+    model: str = "",
+    **extra_attributes: Any,
+) -> Generator[trace.Span, None, None]:
+    """Top-level span for an agent's entire unit of work.
+
+    Usage::
+
+        with agent_span(tracer, "MainAgent", input=query, model="gpt-4") as span:
+            # ... agent work ...
+            span.set_attribute("output", result_json)
+            set_span_token_counts(span, input_tokens=120, output_tokens=340)
+
+    The span automatically records ``start_time`` and ``end_time``.  On
+    exception the span is marked ERROR and the exception is recorded.
+
+    Attributes set automatically:
+        - ``agent.name``
+        - ``agent.input`` (if provided)
+        - ``llm.system_prompt`` / ``llm.user_prompt`` / ``llm.model`` (if provided)
+    """
+    attrs: dict[str, Any] = {"agent.name": agent_name}
+    if input:
+        attrs["agent.input"] = input
+    if system_prompt:
+        attrs["llm.system_prompt"] = system_prompt
+    if user_prompt:
+        attrs["llm.user_prompt"] = user_prompt
+    if model:
+        attrs["llm.model"] = model
+    attrs.update(extra_attributes)
+
+    with tracer.start_as_current_span(agent_name, attributes=attrs) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(trace.StatusCode.ERROR, str(exc))
+            span.record_exception(exc)
+            raise
+
+
+@contextlib.contextmanager
+def operation_span(
+    tracer: trace.Tracer,
+    operation_name: str,
+    *,
+    input: str = "",
+    **extra_attributes: Any,
+) -> Generator[trace.Span, None, None]:
+    """Child span for a single operation within an agent's workflow.
+
+    Automatically becomes a child of the current active span (set by
+    ``agent_span`` or another ``operation_span``).
+
+    Usage::
+
+        with operation_span(tracer, "search_web", input=query) as span:
+            results = await search(query)
+            span.set_attribute("output", json.dumps(results))
+            span.set_attribute("result_count", len(results))
+
+    On exception the span is marked ERROR and the exception is recorded.
+    """
+    attrs: dict[str, Any] = {"operation.name": operation_name}
+    if input:
+        attrs["operation.input"] = input
+    attrs.update(extra_attributes)
+
+    with tracer.start_as_current_span(operation_name, attributes=attrs) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(trace.StatusCode.ERROR, str(exc))
+            span.record_exception(exc)
+            raise
+
+
+@contextlib.contextmanager
+def subagent_span(
+    tracer: trace.Tracer,
+    subagent_name: str,
+    *,
+    input: str = "",
+    system_prompt: str = "",
+    user_prompt: str = "",
+    model: str = "",
+    **extra_attributes: Any,
+) -> Generator[trace.Span, None, None]:
+    """Span for a sub-agent invocation within a parent agent's workflow.
+
+    Works like ``agent_span`` but carries ``subagent.name`` and
+    ``subagent.parent`` attributes to make the delegation visible in
+    trace viewers.
+
+    The sub-agent should use ``operation_span`` for its own child
+    operations — those will nest under this span automatically.
+    """
+    parent = trace.get_current_span()
+    parent_name = ""
+    if parent and parent.is_recording():
+        parent_name = parent.name
+
+    attrs: dict[str, Any] = {
+        "agent.name": subagent_name,
+        "subagent.name": subagent_name,
+        "subagent.parent": parent_name,
+    }
+    if input:
+        attrs["agent.input"] = input
+    if system_prompt:
+        attrs["llm.system_prompt"] = system_prompt
+    if user_prompt:
+        attrs["llm.user_prompt"] = user_prompt
+    if model:
+        attrs["llm.model"] = model
+    attrs.update(extra_attributes)
+
+    with tracer.start_as_current_span(subagent_name, attributes=attrs) as span:
+        span.add_event("subagent.start", {"subagent.name": subagent_name})
+        try:
+            yield span
+        except Exception as exc:
+            span.set_status(trace.StatusCode.ERROR, str(exc))
+            span.record_exception(exc)
+            raise
+        finally:
+            span.add_event("subagent.end", {"subagent.name": subagent_name})
+
+
+def set_span_token_counts(
+    span: trace.Span,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    """Set LLM token count attributes on a span.
+
+    Uses OpenInference semantic conventions so Phoenix/Arize can display
+    token usage correctly.
+    """
+    if input_tokens:
+        span.set_attribute("llm.token_count.prompt", input_tokens)
+    if output_tokens:
+        span.set_attribute("llm.token_count.completion", output_tokens)
+    if input_tokens or output_tokens:
+        span.set_attribute(
+            "llm.token_count.total", input_tokens + output_tokens,
+        )
