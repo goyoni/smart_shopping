@@ -5,6 +5,8 @@ import { StatusWebSocket } from "../lib/websocket";
 import { useLocale } from "../lib/LocaleContext";
 import { t } from "../lib/i18n";
 import ProductCard, { type ProductResultData } from "../components/ProductCard";
+import CrossSellerSection, { type CrossSellerData } from "../components/CrossSellerSection";
+import ModelSection from "../components/ModelSection";
 
 interface HistoryEntry {
   session_id: string;
@@ -49,6 +51,7 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [statusMessages, setStatusMessages] = useState<string[]>([]);
   const [results, setResults] = useState<ProductResultData[]>([]);
+  const [crossSellers, setCrossSellers] = useState<CrossSellerData[]>([]);
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
@@ -92,6 +95,7 @@ export default function Home() {
     setLoading(true);
     setStatusMessages([]);
     setResults([]);
+    setCrossSellers([]);
 
     const sessionId = sessionIdRef.current;
 
@@ -122,6 +126,7 @@ export default function Home() {
       );
       const data = await res.json();
       setResults(data.results || []);
+      setCrossSellers(data.cross_sellers || []);
       setStatusMessages((prev) => [...prev, `Search ${data.status}`]);
     } catch {
       setStatusMessages((prev) => [...prev, "Failed to connect to backend"]);
@@ -150,6 +155,7 @@ export default function Home() {
         if (res.ok) {
           const data = await res.json();
           setResults(data.results || []);
+          setCrossSellers(data.cross_sellers || []);
           setStatusMessages([`Loaded ${(data.results || []).length} saved results`]);
           return;
         }
@@ -271,32 +277,64 @@ export default function Home() {
         </ul>
       )}
 
-      {results.length > 0 && (
-        <div style={{ marginTop: "1.5rem" }}>
-          <h2 style={{ marginBottom: "0.75rem" }}>
-            {t(locale, "search.results_count", {
-              count: results.length,
-              sites: sourceDomains.size,
-            })}
-          </h2>
+      {results.length > 0 && (() => {
+        // Check if results are grouped by model (multi-model search)
+        const hasProductTypes = results.some((r) => r.product_type);
+        const modelGroups: Map<string, ProductResultData[]> = new Map();
+        if (hasProductTypes) {
+          for (const r of results) {
+            const key = r.product_type || "Other";
+            if (!modelGroups.has(key)) modelGroups.set(key, []);
+            modelGroups.get(key)!.push(r);
+          }
+        }
+        const isMultiModel = modelGroups.size >= 2;
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-              gap: "1rem",
-            }}
-          >
-            {results.map((r, i) => (
-              <ProductCard
-                key={i}
-                product={r}
-                onAddToList={(p) => addToShoppingList(apiBase, p)}
-              />
-            ))}
+        return (
+          <div style={{ marginTop: "1.5rem" }}>
+            <h2 style={{ marginBottom: "0.75rem" }}>
+              {t(locale, "search.results_count", {
+                count: results.length,
+                sites: sourceDomains.size,
+              })}
+            </h2>
+
+            {/* Cross-seller section for multi-model searches */}
+            {crossSellers.length > 0 && (
+              <CrossSellerSection crossSellers={crossSellers} />
+            )}
+
+            {isMultiModel ? (
+              /* Grouped by model — header + seller table per model */
+              Array.from(modelGroups.entries()).map(([modelId, products]) => (
+                <ModelSection
+                  key={modelId}
+                  modelId={modelId}
+                  products={products}
+                  onAddToList={(p) => addToShoppingList(apiBase, p)}
+                />
+              ))
+            ) : (
+              /* Flat grid for single-product searches */
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+                  gap: "1rem",
+                }}
+              >
+                {results.map((r, i) => (
+                  <ProductCard
+                    key={i}
+                    product={r}
+                    onAddToList={(p) => addToShoppingList(apiBase, p)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+      })()}
     </main>
   );
 }
