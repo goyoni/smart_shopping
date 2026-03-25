@@ -290,6 +290,14 @@ async def _extract_single_product(
         except Exception:
             pass
 
+    # Fallback: extract price from container text using regex
+    if price is None:
+        try:
+            container_text = (await container.inner_text()).strip()
+            price, currency = _extract_price_from_text(container_text, currency)
+        except Exception:
+            pass
+
     # Extract product URL
     product_url: str | None = None
     if strategy.url_selector:
@@ -385,6 +393,36 @@ async def _extract_single_product(
         criteria=criteria_data,
         sellers=[seller],
     )
+
+
+def _extract_price_from_text(text: str, default_currency: str = "USD") -> tuple[float | None, str]:
+    """Extract price from free text as a fallback when CSS selectors fail.
+
+    Looks for currency symbol followed by a number, or a number followed by
+    a currency symbol/code.  Returns (price, currency).
+    """
+    if not text:
+        return None, default_currency
+
+    # Patterns: ₪1,234.56  |  $999  |  1,234.56 ₪  |  EUR 123
+    patterns = [
+        (r"₪\s*([\d,]+(?:\.\d{1,2})?)", "ILS"),
+        (r"([\d,]+(?:\.\d{1,2})?)\s*₪", "ILS"),
+        (r"\$\s*([\d,]+(?:\.\d{1,2})?)", "USD"),
+        (r"([\d,]+(?:\.\d{1,2})?)\s*\$", "USD"),
+        (r"€\s*([\d,]+(?:\.\d{1,2})?)", "EUR"),
+        (r"([\d,]+(?:\.\d{1,2})?)\s*€", "EUR"),
+        (r"£\s*([\d,]+(?:\.\d{1,2})?)", "GBP"),
+        (r"(?:ILS|NIS)\s*([\d,]+(?:\.\d{1,2})?)", "ILS"),
+    ]
+    for pattern, cur in patterns:
+        match = re.search(pattern, text)
+        if match:
+            price = parse_price(match.group(1))
+            if price is not None and price > 0:
+                return price, cur
+
+    return None, default_currency
 
 
 def _detect_currency_from_text(text: str) -> str:

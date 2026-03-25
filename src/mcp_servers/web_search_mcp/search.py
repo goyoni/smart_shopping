@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import quote_plus, unquote
@@ -58,6 +59,14 @@ _LANG_NAMES: dict[str, str] = {
     "en": "English",
     "de": "German",
     "fr": "French",
+}
+
+_MARKET_NAMES: dict[str, str] = {
+    "il": "Israel",
+    "us": "United States",
+    "uk": "United Kingdom",
+    "de": "Germany",
+    "fr": "France",
 }
 
 
@@ -516,3 +525,112 @@ async def search_products_via_browser(
     # Fallback to HTTP-based search
     logger.info("Falling back to HTTP search for '%s'", query)
     return await search_products(query, language, market, refined_query=refined_query)
+
+
+async def get_aggregator_urls(
+    model_id: str,
+    market: str,
+    category: str | None = None,
+) -> list[dict[str, str]]:
+    """Return direct aggregator search URLs for a model in the given market.
+
+    Queries the DB for aggregators matching the market and category.
+    Each returned dict has ``domain`` and ``url`` keys.
+    """
+    from src.mcp_servers.web_search_mcp.aggregator_db import (
+        build_aggregator_url,
+        get_aggregators,
+    )
+
+    templates = await get_aggregators(market, category)
+    return [
+        {"domain": t["domain"], "url": build_aggregator_url(t["url_template"], model_id)}
+        for t in templates
+    ]
+
+
+async def discover_aggregators(
+    market: str,
+    category: str,
+) -> list[dict[str, str]]:
+    """Use LLM to discover aggregator/price-comparison sites for a market+category.
+
+    Returns a list of ``{"domain": ..., "url_template": ...}`` dicts.
+    Saves discovered sites to DB for future use.
+    """
+    if not settings.llm_api_key:
+        return []
+
+    market_name = _MARKET_NAMES.get(market, market.upper())
+    try:
+        response = await litellm.acompletion(
+            model=settings.llm_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a shopping research expert. Given a country and product category, "
+                        "return a JSON array of price-comparison or marketplace websites popular in "
+                        "that country for that category. Each entry should have:\n"
+                        '- "domain": the site domain (e.g. "zap.co.il")\n'
+                        '- "url_template": the search URL with {query} as placeholder\n'
+                        '- "categories": array of category keywords this site covers\n'
+                        "Return ONLY the JSON array, no other text. "
+                        "Include 3-5 sites. Only include real, well-known sites."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Country: {market_name}\nProduct category: {category}",
+                },
+            ],
+            temperature=0.2,
+            api_key=settings.llm_api_key,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        # Strip markdown fences
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        sites = json.loads(raw)
+        if not isinstance(sites, list):
+            return []
+
+        from src.mcp_servers.web_search_mcp.aggregator_db import save_aggregator
+
+        saved: list[dict[str, str]] = []
+        for site in sites:
+            domain = site.get("domain", "")
+            url_tpl = site.get("url_template", "")
+            cats = site.get("categories", [])
+            if not domain or not url_tpl or "{query}" not in url_tpl:
+                continue
+            await save_aggregator(domain, url_tpl, market, cats, source="llm")
+            saved.append({"domain": domain, "url_template": url_tpl})
+
+        logger.info(
+            "Discovered %d aggregators for %s/%s via LLM",
+            len(saved), market, category,
+        )
+        return saved
+
+    except Exception:
+        logger.warning(
+            "LLM aggregator discovery failed for %s/%s",
+            market, category, exc_info=True,
+        )
+        return []
+
+
+async def search_on_site(
+    model_id: str,
+    domain: str,
+    language: str = "en",
+    market: str = "us",
+) -> list[SearchResult]:
+    """Search for a model ID on a specific seller's website via DuckDuckGo ``site:`` prefix."""
+    site_query = f"site:{domain} {model_id}"
+    url = build_search_url(site_query, language, market)
+    results = await _run_single_search(url, site_query)
+    # Filter to results actually on the target domain
+    return [r for r in results if domain in r.url]

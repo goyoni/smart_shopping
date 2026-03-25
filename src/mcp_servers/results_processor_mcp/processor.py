@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.shared.logging import get_logger
-from src.shared.models import ProductResult, Seller
+from src.shared.models import CrossSeller, ProductResult, Seller
 
 logger = get_logger(__name__)
 
@@ -326,3 +326,131 @@ def _best_currency(product: ProductResult) -> str:
         if seller.price is not None:
             return seller.currency
     return "USD"
+
+
+def find_missing_models(
+    products: list[ProductResult],
+    model_ids: list[str],
+) -> dict[str, list[str]]:
+    """Identify which models are missing per seller domain.
+
+    Builds a seller→models map from existing products and returns a dict
+    mapping each seller domain to the list of model IDs it does NOT carry.
+    Only returns sellers that carry at least one model (potential cross-sellers).
+
+    Returns:
+        ``{seller_domain: [missing_model_ids]}``
+    """
+    # Build map: domain → set of model IDs this seller carries
+    domain_models: dict[str, set[str]] = defaultdict(set)
+    # Also track which URL we have per domain (for reference)
+    domain_urls: dict[str, str] = {}
+
+    model_set = set(m.lower() for m in model_ids)
+
+    for product in products:
+        ptype = (product.product_type or "").lower()
+        if ptype not in model_set:
+            continue
+        for seller in product.sellers:
+            domain = _extract_domain(seller.url or "") or seller.name
+            if not domain:
+                continue
+            domain_models[domain].add(ptype)
+            if seller.url and domain not in domain_urls:
+                domain_urls[domain] = seller.url
+
+    # For each seller, find which models are missing
+    missing: dict[str, list[str]] = {}
+    for domain, carried in domain_models.items():
+        missing_ids = [mid for mid in model_ids if mid.lower() not in carried]
+        if missing_ids:
+            missing[domain] = missing_ids
+
+    return missing
+
+
+_MAX_CROSS_SELLERS = 10
+
+
+def find_cross_sellers(
+    products: list[ProductResult],
+) -> list[CrossSeller]:
+    """Identify sellers that carry multiple products from a multi-model search.
+
+    Groups products by ``product_type`` (the model ID), then finds seller
+    domains appearing across 2+ groups.  Returns up to 10 cross-sellers
+    sorted by number of products carried (descending), then by total price.
+    """
+    # Group products by model (product_type)
+    by_model: dict[str, list[ProductResult]] = defaultdict(list)
+    for p in products:
+        key = p.product_type or p.model_id or p.name
+        by_model[key].append(p)
+
+    if len(by_model) < 2:
+        return []
+
+    # For each seller domain, track which models it carries and best price per model
+    # seller_domain -> { model_id -> (best_price, currency, seller) }
+    domain_models: dict[str, dict[str, tuple[float | None, str, Seller]]] = defaultdict(dict)
+
+    for model_key, model_products in by_model.items():
+        for product in model_products:
+            for seller in product.sellers:
+                domain = _extract_domain(seller.url or "") or seller.name
+                if not domain:
+                    continue
+                existing = domain_models[domain].get(model_key)
+                # Keep the seller with the best (lowest) price for this model
+                if existing is None or (
+                    seller.price is not None
+                    and (existing[0] is None or seller.price < existing[0])
+                ):
+                    domain_models[domain][model_key] = (seller.price, seller.currency, seller)
+
+    # Filter to domains carrying 2+ models
+    cross: list[CrossSeller] = []
+    for domain, models in domain_models.items():
+        if len(models) < 2:
+            continue
+
+        product_names = list(models.keys())
+        prices: dict[str, float] = {}
+        total: float = 0.0
+        all_priced = True
+        currency = "USD"
+        # Pick contact info from the first seller with data
+        url: str | None = None
+        phone: str | None = None
+        email: str | None = None
+
+        for model_key, (price, cur, seller) in models.items():
+            currency = cur
+            if price is not None:
+                prices[model_key] = price
+                total += price
+            else:
+                all_priced = False
+            if not url and seller.url:
+                url = seller.url
+            if not phone and seller.phone:
+                phone = seller.phone
+            if not email and seller.email:
+                email = seller.email
+
+        cross.append(CrossSeller(
+            name=domain,
+            domain=domain,
+            url=url,
+            phone=phone,
+            email=email,
+            products=product_names,
+            prices=prices,
+            total_price=total if all_priced else None,
+            currency=currency,
+        ))
+
+    # Sort: most products first, then lowest total price
+    cross.sort(key=lambda c: (-len(c.products), c.total_price or float("inf")))
+    return cross[:_MAX_CROSS_SELLERS]

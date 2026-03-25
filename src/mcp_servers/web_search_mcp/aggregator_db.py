@@ -1,0 +1,152 @@
+"""Aggregator site persistence and discovery."""
+
+from __future__ import annotations
+
+import json
+from urllib.parse import quote_plus
+
+from sqlalchemy import select
+
+from src.backend.db.engine import async_session
+from src.backend.db.models import AggregatorSite
+from src.shared.logging import get_logger
+
+logger = get_logger(__name__)
+
+_EMA_ALPHA = 0.3
+
+# Default seed data — inserted on first access when the table is empty.
+# ``categories``: empty list means "all categories" (general-purpose aggregator).
+_DEFAULTS: list[dict] = [
+    # Israel
+    {"domain": "zap.co.il", "url_template": "https://www.zap.co.il/search.aspx?keyword={query}", "market": "il", "categories": ["appliances", "electronics"]},
+    {"domain": "ksp.co.il", "url_template": "https://ksp.co.il/?select=search&q={query}", "market": "il", "categories": ["electronics", "computers"]},
+    {"domain": "ivory.co.il", "url_template": "https://www.ivory.co.il/catalog.php?act=cat&q={query}", "market": "il", "categories": ["electronics", "appliances"]},
+    {"domain": "lastprice.co.il", "url_template": "https://www.lastprice.co.il/search/{query}", "market": "il", "categories": []},
+    # US
+    {"domain": "amazon.com", "url_template": "https://www.amazon.com/s?k={query}", "market": "us", "categories": []},
+    {"domain": "bestbuy.com", "url_template": "https://www.bestbuy.com/site/searchpage.jsp?st={query}", "market": "us", "categories": ["electronics", "appliances"]},
+    # UK
+    {"domain": "amazon.co.uk", "url_template": "https://www.amazon.co.uk/s?k={query}", "market": "uk", "categories": []},
+    # Germany
+    {"domain": "amazon.de", "url_template": "https://www.amazon.de/s?k={query}", "market": "de", "categories": []},
+    {"domain": "mediamarkt.de", "url_template": "https://www.mediamarkt.de/de/search.html?query={query}", "market": "de", "categories": ["electronics", "appliances"]},
+    # France
+    {"domain": "amazon.fr", "url_template": "https://www.amazon.fr/s?k={query}", "market": "fr", "categories": []},
+    {"domain": "fnac.com", "url_template": "https://www.fnac.com/SearchResult/ResultList.aspx?Search={query}", "market": "fr", "categories": ["electronics", "media"]},
+]
+
+
+async def _seed_defaults() -> None:
+    """Insert default aggregator entries if the table is empty."""
+    async with async_session() as session:
+        count_result = await session.execute(select(AggregatorSite.id).limit(1))
+        if count_result.scalar_one_or_none() is not None:
+            return  # Already seeded
+
+        for entry in _DEFAULTS:
+            record = AggregatorSite(
+                domain=entry["domain"],
+                url_template=entry["url_template"],
+                market=entry["market"],
+                categories_json=json.dumps(entry["categories"]),
+                source="default",
+            )
+            session.add(record)
+        await session.commit()
+        logger.info("Seeded %d default aggregator sites", len(_DEFAULTS))
+
+
+async def get_aggregators(
+    market: str,
+    category: str | None = None,
+) -> list[dict[str, str]]:
+    """Return aggregator URLs for a market, optionally filtered by category.
+
+    Returns list of ``{"domain": ..., "url_template": ...}`` dicts.
+    Aggregators with empty categories list match all categories.
+    """
+    await _seed_defaults()
+
+    async with async_session() as session:
+        stmt = (
+            select(AggregatorSite)
+            .where(
+                AggregatorSite.market == market,
+                AggregatorSite.success_rate >= 0.3,
+            )
+            .order_by(AggregatorSite.success_rate.desc())
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+
+    aggregators: list[dict[str, str]] = []
+    for row in rows:
+        cats = json.loads(row.categories_json) if row.categories_json else []
+        # Empty categories list means "all categories"
+        if cats and category and category not in cats:
+            continue
+        aggregators.append({
+            "domain": row.domain,
+            "url_template": row.url_template,
+        })
+
+    return aggregators
+
+
+def build_aggregator_url(url_template: str, query: str) -> str:
+    """Replace ``{query}`` placeholder with URL-encoded query."""
+    return url_template.replace("{query}", quote_plus(query))
+
+
+async def save_aggregator(
+    domain: str,
+    url_template: str,
+    market: str,
+    categories: list[str] | None = None,
+    source: str = "llm",
+) -> None:
+    """Add or update an aggregator site."""
+    async with async_session() as session:
+        stmt = select(AggregatorSite).where(
+            AggregatorSite.domain == domain,
+            AggregatorSite.market == market,
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        cats_json = json.dumps(categories or [])
+
+        if record:
+            record.url_template = url_template
+            record.categories_json = cats_json
+            record.source = source
+        else:
+            record = AggregatorSite(
+                domain=domain,
+                url_template=url_template,
+                market=market,
+                categories_json=cats_json,
+                source=source,
+            )
+            session.add(record)
+
+        await session.commit()
+        logger.info("Saved aggregator %s for market=%s", domain, market)
+
+
+async def update_aggregator_success(domain: str, market: str, success: bool) -> None:
+    """Update success rate for an aggregator using exponential moving average."""
+    async with async_session() as session:
+        stmt = select(AggregatorSite).where(
+            AggregatorSite.domain == domain,
+            AggregatorSite.market == market,
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            return
+
+        new_value = 1.0 if success else 0.0
+        record.success_rate = _EMA_ALPHA * new_value + (1 - _EMA_ALPHA) * record.success_rate
+        await session.commit()
