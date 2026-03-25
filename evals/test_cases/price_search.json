@@ -1,0 +1,17 @@
+[
+  {
+    "id": "ps_001",
+    "name": "Multi-model price search (Bosch appliances IL)",
+    "input": "BFL523MB1F, HBG578EB3, PVS631HC1E, SMV4HAX21E",
+    "language": "he",
+    "market": "il",
+    "expected": {
+      "min_results": 10,
+      "min_results_per_model": 10,
+      "model_ids": ["BFL523MB1F", "HBG578EB3", "PVS631HC1E", "SMV4HAX21E"],
+      "min_cross_sellers": 2,
+      "required_cross_seller_domains": ["soferavi.co.il", "superelectric.co.il"],
+      "search_type": "multi_model"
+    }
+  }
+]
