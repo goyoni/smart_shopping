@@ -364,7 +364,6 @@ async def search_products(
     span.set_attribute("search_url", url)
 
     logger.info("Starting search for '%s' (language=%s, market=%s)", query, language, market)
-    span.add_event("search_started", {"query": query, "language": language, "market": market, "url": url})
 
     # Determine if a second localized search is needed
     market_lang = _MARKET_LANGUAGE.get(market)
@@ -381,7 +380,7 @@ async def search_products(
             )
             span.set_attribute("local_search_url", local_url)
             span.set_attribute("translated_query", translated)
-            span.add_event("dual_search", {"local_url": local_url, "translated": translated})
+            span.set_attribute("search_mode", "dual")
 
             # Run both searches concurrently
             primary_task = _run_single_search(url, query, _max_attempts=_max_attempts)
@@ -399,7 +398,6 @@ async def search_products(
             span.set_attribute("result_count", len(merged))
             span.set_attribute("local_result_count", len(local_results))
             span.set_attribute("primary_result_count", len(primary_results))
-            span.add_event("search_completed", {"result_count": len(merged)})
             logger.info(
                 "Dual search: %d local + %d primary = %d merged for '%s'",
                 len(local_results), len(primary_results), len(merged), query,
@@ -411,9 +409,6 @@ async def search_products(
     span.set_attribute("result_count", len(results))
     if not results:
         span.set_attribute("exit_reason", "no_results_extracted")
-        span.add_event("search_completed", {"result_count": 0, "exit_reason": "no_results_extracted"})
-    else:
-        span.add_event("search_completed", {"result_count": len(results)})
     return results
 
 
