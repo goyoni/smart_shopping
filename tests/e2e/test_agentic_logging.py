@@ -351,6 +351,15 @@ def _get_attr(span: Any, key: str) -> Any:
     return span.attributes.get(key)
 
 
+def _logical_name(span: Any) -> str:
+    """Return the logical name of a span (agent.name or operation.name)."""
+    return (
+        _get_attr(span, "agent.name")
+        or _get_attr(span, "operation.name")
+        or span.name
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -428,11 +437,16 @@ class TestAgenticLogging:
         roots = [s for s in spans if s.parent is None]
         assert len(roots) == 1, f"Expected 1 root span, got {len(roots)}"
         root = roots[0]
-        assert root.name == "MainAgent", f"Root span should be MainAgent, got '{root.name}'"
+        assert _logical_name(root) == "MainAgent", f"Root span should be MainAgent, got '{_logical_name(root)}'"
+
+        # Span names should include input preview
+        assert "find best headphones" in root.name, (
+            f"Root span name should include input preview, got '{root.name}'"
+        )
 
         # MainAgent should have children: initialize, SubAgent1, SubAgent2, SubAgent3, finalize
         root_children = children.get(root.context.span_id, [])
-        root_child_names = sorted(by_id[c].name for c in root_children)
+        root_child_names = sorted(_logical_name(by_id[c]) for c in root_children)
         assert "initialize" in root_child_names, f"Missing 'initialize' in root children: {root_child_names}"
         assert "finalize" in root_child_names, f"Missing 'finalize' in root children: {root_child_names}"
         assert "SubAgent1" in root_child_names, f"Missing 'SubAgent1' in root children: {root_child_names}"
@@ -440,35 +454,35 @@ class TestAgenticLogging:
         assert "SubAgent3" in root_child_names, f"Missing 'SubAgent3' in root children: {root_child_names}"
 
         # SubAgent2 should have children: scrape_pages, SubAgentB
-        sa2 = next(by_id[c] for c in root_children if by_id[c].name == "SubAgent2")
+        sa2 = next(by_id[c] for c in root_children if _logical_name(by_id[c]) == "SubAgent2")
         sa2_children = children.get(sa2.context.span_id, [])
-        sa2_child_names = sorted(by_id[c].name for c in sa2_children)
+        sa2_child_names = sorted(_logical_name(by_id[c]) for c in sa2_children)
         assert "scrape_pages" in sa2_child_names, f"Missing 'scrape_pages' in SubAgent2 children: {sa2_child_names}"
         assert "SubAgentB" in sa2_child_names, f"Missing 'SubAgentB' in SubAgent2 children: {sa2_child_names}"
 
         # SubAgentB should have children: prepare_data, SubAgentC, summarize
-        sab = next(by_id[c] for c in sa2_children if by_id[c].name == "SubAgentB")
+        sab = next(by_id[c] for c in sa2_children if _logical_name(by_id[c]) == "SubAgentB")
         sab_children = children.get(sab.context.span_id, [])
-        sab_child_names = sorted(by_id[c].name for c in sab_children)
+        sab_child_names = sorted(_logical_name(by_id[c]) for c in sab_children)
         assert "prepare_data" in sab_child_names
         assert "SubAgentC" in sab_child_names
         assert "summarize" in sab_child_names
 
         # SubAgentC should have children: deduplicate_records, format_output
-        sac = next(by_id[c] for c in sab_children if by_id[c].name == "SubAgentC")
+        sac = next(by_id[c] for c in sab_children if _logical_name(by_id[c]) == "SubAgentC")
         sac_children = children.get(sac.context.span_id, [])
-        sac_child_names = sorted(by_id[c].name for c in sac_children)
+        sac_child_names = sorted(_logical_name(by_id[c]) for c in sac_children)
         assert "deduplicate_records" in sac_child_names
         assert "format_output" in sac_child_names
 
         # SubAgent1 should have 3 leaf operations
-        sa1 = next(by_id[c] for c in root_children if by_id[c].name == "SubAgent1")
+        sa1 = next(by_id[c] for c in root_children if _logical_name(by_id[c]) == "SubAgent1")
         sa1_children = children.get(sa1.context.span_id, [])
-        sa1_child_names = sorted(by_id[c].name for c in sa1_children)
+        sa1_child_names = sorted(_logical_name(by_id[c]) for c in sa1_children)
         assert len(sa1_child_names) == 3, f"SubAgent1 should have 3 ops, got {sa1_child_names}"
 
         # SubAgent3 should have 2 leaf operations
-        sa3 = next(by_id[c] for c in root_children if by_id[c].name == "SubAgent3")
+        sa3 = next(by_id[c] for c in root_children if _logical_name(by_id[c]) == "SubAgent3")
         sa3_children = children.get(sa3.context.span_id, [])
         assert len(sa3_children) == 2, f"SubAgent3 should have 2 ops, got {len(sa3_children)}"
 
@@ -587,6 +601,7 @@ class TestAgenticLogging:
             if _get_attr(span, "subagent.name"):
                 span_type = "subagent"
             duration_ms = (span.end_time - span.start_time) / 1e6
+            # span.name now includes input preview for readability
             print(f"{prefix}[{span_type}] {span.name} ({duration_ms:.1f}ms)")
             for child_id in children.get(span_id, []):
                 _print_tree(child_id, depth + 1)
@@ -614,7 +629,9 @@ class TestAgenticLogging:
             print(f">>> Open: {phoenix_ui_url}")
             print(f">>> Trace ID: {trace_hex}")
             print("=" * 70)
-            input("\nPress Enter to shut down Phoenix and finish the test...")
+            import sys
+            if sys.stdin.isatty():
+                input("\nPress Enter to shut down Phoenix and finish the test...")
         else:
             print(f"\n>>> Phoenix (arize-phoenix) is not installed.")
             print(f">>> Install with: pip install -e \".[dashboard]\"")

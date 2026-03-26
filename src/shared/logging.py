@@ -231,6 +231,21 @@ import contextlib
 from collections.abc import Generator
 from typing import Any
 
+_SPAN_NAME_INPUT_MAX = 40
+
+
+def _span_display_name(name: str, input_preview: str) -> str:
+    """Build a span name with a truncated input preview for trace tree readability.
+
+    Example: ``"MainAgent: find best headphones under $2..."``
+    """
+    if not input_preview:
+        return name
+    preview = input_preview.replace("\n", " ").strip()
+    if len(preview) > _SPAN_NAME_INPUT_MAX:
+        preview = preview[:_SPAN_NAME_INPUT_MAX] + "..."
+    return f"{name}: {preview}"
+
 
 @contextlib.contextmanager
 def agent_span(
@@ -271,7 +286,8 @@ def agent_span(
         attrs["llm.model"] = model
     attrs.update(extra_attributes)
 
-    with tracer.start_as_current_span(agent_name, attributes=attrs) as span:
+    display_name = _span_display_name(agent_name, input)
+    with tracer.start_as_current_span(display_name, attributes=attrs) as span:
         try:
             yield span
         except Exception as exc:
@@ -307,7 +323,8 @@ def operation_span(
         attrs["operation.input"] = input
     attrs.update(extra_attributes)
 
-    with tracer.start_as_current_span(operation_name, attributes=attrs) as span:
+    display_name = _span_display_name(operation_name, input)
+    with tracer.start_as_current_span(display_name, attributes=attrs) as span:
         try:
             yield span
         except Exception as exc:
@@ -356,7 +373,8 @@ def subagent_span(
         attrs["llm.model"] = model
     attrs.update(extra_attributes)
 
-    with tracer.start_as_current_span(subagent_name, attributes=attrs) as span:
+    display_name = _span_display_name(subagent_name, input)
+    with tracer.start_as_current_span(display_name, attributes=attrs) as span:
         span.add_event("subagent.start", {"subagent.name": subagent_name})
         try:
             yield span

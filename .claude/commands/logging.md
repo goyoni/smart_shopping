@@ -56,7 +56,13 @@ The agentic logging layer uses **hierarchical nested spans** — NOT flat events
    - `llm.token_count.total` — total tokens (auto-set by `set_span_token_counts`)
    - Use `set_span_token_counts(span, input_tokens=..., output_tokens=...)` helper
 
-5. **Timing is automatic.**
+5. **Span names include input previews for readability.**
+   - The `input` parameter is automatically appended to the span name (truncated to 40 chars)
+   - Example: `"MainAgent: find best headphones under $2..."` instead of just `"MainAgent"`
+   - This makes trace trees scannable in Phoenix without clicking into each span
+   - The full input is always available in the `agent.input` / `operation.input` attribute
+
+6. **Timing is automatic.**
    - `agent_span` / `operation_span` / `subagent_span` are context managers
    - Start time = when the `with` block is entered
    - End time = when the `with` block exits
