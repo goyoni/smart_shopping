@@ -9,7 +9,7 @@ import litellm
 
 from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.shared.config import settings
-from src.shared.logging import get_logger, get_tracer
+from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
 
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
@@ -111,20 +111,25 @@ async def discover_criteria_via_llm(
     if not settings.llm_api_key:
         return {}
 
-    with _tracer.start_as_current_span(
-        "llm_discover_criteria",
-        attributes={"category": category},
+    user_message = f"Category: {category}"
+    if snippets:
+        snippet_text = "\n".join(snippets[:5])
+        user_message += f"\n\nHere are some web snippets about this product to help you identify relevant criteria:\n{snippet_text}"
+
+    with operation_span(
+        _tracer, "llm_discover_criteria",
+        input=category,
+        **{
+            "llm.system_prompt": _SYSTEM_PROMPT,
+            "llm.user_prompt": user_message,
+            "llm.model": settings.llm_model,
+        },
     ) as span:
         try:
             examples_text = "\n\n".join(
                 f"Category: {ex['category']}\n{json.dumps(ex['criteria'], indent=2)}"
                 for ex in _FEW_SHOT_EXAMPLES
             )
-
-            user_message = f"Category: {category}"
-            if snippets:
-                snippet_text = "\n".join(snippets[:5])
-                user_message += f"\n\nHere are some web snippets about this product to help you identify relevant criteria:\n{snippet_text}"
 
             response = await litellm.acompletion(
                 model=settings.llm_model,
@@ -141,13 +146,22 @@ async def discover_criteria_via_llm(
             raw_text = response.choices[0].message.content or ""
             span.set_attribute("raw_response_length", len(raw_text))
 
+            # Record token usage
+            usage = getattr(response, "usage", None)
+            if usage:
+                set_span_token_counts(
+                    span,
+                    input_tokens=getattr(usage, "prompt_tokens", 0),
+                    output_tokens=getattr(usage, "completion_tokens", 0),
+                )
+
             cleaned = _strip_markdown_fences(raw_text)
             parsed = json.loads(cleaned)
 
             criteria = _validate_criteria_structure(parsed)
             if criteria is None:
                 logger.warning("LLM returned invalid criteria structure for '%s'", category)
-                span.set_attribute("result", "invalid_structure")
+                span.set_attribute("output", json.dumps({"result": "invalid_structure"}))
                 return {}
 
             # Ensure price is always present
@@ -159,15 +173,17 @@ async def discover_criteria_via_llm(
                     "description": "",
                 }
 
-            span.set_attribute("criteria_count", len(criteria))
-            span.set_attribute("criteria_keys", json.dumps(list(criteria.keys())))
-            span.set_attribute("result", "success")
+            span.set_attribute("output", json.dumps({
+                "result": "success",
+                "criteria_count": len(criteria),
+                "criteria_keys": list(criteria.keys()),
+            }))
             logger.info("LLM discovered %d criteria for '%s'", len(criteria), category)
             return criteria
 
         except Exception:
             logger.warning("LLM criteria discovery failed for '%s'", category, exc_info=True)
-            span.set_attribute("result", "error")
+            span.set_attribute("output", json.dumps({"result": "error"}))
             return {}
 
 
@@ -185,47 +201,57 @@ async def extract_query_attributes_via_llm(
     if not settings.llm_api_key:
         return []
 
-    with _tracer.start_as_current_span(
-        "llm_extract_attributes",
-        attributes={"query": query},
+    _ATTR_SYSTEM_PROMPT = (
+        "You extract user shopping preferences from a search query. "
+        "Given a query and a list of available criteria, return a JSON array "
+        "of objects with: criterion_key (must be from the list), direction "
+        '("low" or "high"), and display_label (short human-readable label). '
+        "Only include criteria the user clearly cares about. "
+        "Return ONLY the JSON array, no markdown."
+    )
+
+    criteria_desc = "\n".join(
+        f"- {key}: {spec.get('display_name', key)} ({spec.get('unit', '')})"
+        for key, spec in criteria.items()
+    )
+    user_message = f"Query: {query}\n\nAvailable criteria:\n{criteria_desc}"
+
+    with operation_span(
+        _tracer, "llm_extract_attributes",
+        input=query,
+        **{
+            "llm.system_prompt": _ATTR_SYSTEM_PROMPT,
+            "llm.user_prompt": user_message,
+            "llm.model": settings.llm_model,
+        },
     ) as span:
         try:
-            criteria_desc = "\n".join(
-                f"- {key}: {spec.get('display_name', key)} ({spec.get('unit', '')})"
-                for key, spec in criteria.items()
-            )
-
             response = await litellm.acompletion(
                 model=settings.llm_model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You extract user shopping preferences from a search query. "
-                            "Given a query and a list of available criteria, return a JSON array "
-                            "of objects with: criterion_key (must be from the list), direction "
-                            '("low" or "high"), and display_label (short human-readable label). '
-                            "Only include criteria the user clearly cares about. "
-                            "Return ONLY the JSON array, no markdown."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Query: {query}\n\nAvailable criteria:\n{criteria_desc}"
-                        ),
-                    },
+                    {"role": "system", "content": _ATTR_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
                 ],
                 temperature=settings.llm_temperature,
                 api_key=settings.llm_api_key,
             )
 
             raw_text = response.choices[0].message.content or ""
+
+            # Record token usage
+            usage = getattr(response, "usage", None)
+            if usage:
+                set_span_token_counts(
+                    span,
+                    input_tokens=getattr(usage, "prompt_tokens", 0),
+                    output_tokens=getattr(usage, "completion_tokens", 0),
+                )
+
             cleaned = _strip_markdown_fences(raw_text)
             parsed = json.loads(cleaned)
 
             if not isinstance(parsed, list):
-                span.set_attribute("result", "invalid_format")
+                span.set_attribute("output", json.dumps({"result": "invalid_format"}))
                 return []
 
             attributes: list[QueryAttribute] = []
@@ -236,7 +262,6 @@ async def extract_query_attributes_via_llm(
                 key = item.get("criterion_key", "")
                 direction = item.get("direction", "")
                 label = item.get("display_label", "")
-                # Only accept keys that exist in the criteria dict
                 if key not in criteria:
                     continue
                 if direction not in ("low", "high"):
@@ -250,11 +275,13 @@ async def extract_query_attributes_via_llm(
                     display_label=label or criteria[key].get("display_name", key),
                 ))
 
-            span.set_attribute("attribute_count", len(attributes))
-            span.set_attribute("result", "success")
+            span.set_attribute("output", json.dumps({
+                "result": "success",
+                "attribute_count": len(attributes),
+            }))
             return attributes
 
         except Exception:
             logger.warning("LLM attribute extraction failed for '%s'", query, exc_info=True)
-            span.set_attribute("result", "error")
+            span.set_attribute("output", json.dumps({"result": "error"}))
             return []
