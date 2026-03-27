@@ -288,8 +288,28 @@ def parse_session(filepath: Path) -> dict:
     }
 
 
+def get_hidden_sessions_file(project_dir: Path) -> Path:
+    return project_dir / ".session-viewer-hidden.json"
+
+
+def load_hidden_sessions(project_dir: Path) -> set[str]:
+    hidden_file = get_hidden_sessions_file(project_dir)
+    if hidden_file.exists():
+        try:
+            return set(json.loads(hidden_file.read_text()))
+        except (json.JSONDecodeError, TypeError):
+            return set()
+    return set()
+
+
+def save_hidden_sessions(project_dir: Path, hidden: set[str]):
+    hidden_file = get_hidden_sessions_file(project_dir)
+    hidden_file.write_text(json.dumps(sorted(hidden)))
+
+
 def get_sessions_list(project_dir: Path) -> list[dict]:
     """Get a summary list of all sessions."""
+    hidden = load_hidden_sessions(project_dir)
     sessions = []
     for f in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
         session = parse_session(f)
@@ -300,6 +320,17 @@ def get_sessions_list(project_dir: Path) -> list[dict]:
             if user_text and not user_text.startswith("/clear"):
                 preview = user_text[:150]
                 break
+
+        # Collect all text for full-text search
+        all_text_parts = []
+        for turn in session["turns"]:
+            all_text_parts.append(turn["user"]["text"])
+            for am in turn["assistant_messages"]:
+                if am.get("text"):
+                    all_text_parts.append(am["text"])
+                for tool in am.get("tools", []):
+                    if tool.get("target"):
+                        all_text_parts.append(tool["target"])
 
         sessions.append({
             "session_id": session["session_id"],
@@ -312,6 +343,8 @@ def get_sessions_list(project_dir: Path) -> list[dict]:
             "total_tokens": session["total_tokens"],
             "preview": preview,
             "file_size_kb": round(f.stat().st_size / 1024, 1),
+            "hidden": session["session_id"] in hidden,
+            "searchable_text": "\n".join(all_text_parts),
         })
 
     return sessions
@@ -394,6 +427,29 @@ class SessionViewerHandler(SimpleHTTPRequestHandler):
                             continue
             self.json_response(entries)
 
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        params = parse_qs(parsed.query)
+
+        if path == "/api/hide-session":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+            session_id = body.get("session_id")
+            hide = body.get("hide", True)
+            project = body.get("project") or params.get("project", [None])[0]
+
+            proj_dir = PROJECTS_DIR / project if project else self.project_dir
+            hidden = load_hidden_sessions(proj_dir)
+            if hide:
+                hidden.add(session_id)
+            else:
+                hidden.discard(session_id)
+            save_hidden_sessions(proj_dir, hidden)
+            self.json_response({"ok": True, "hidden": sorted(hidden)})
         else:
             self.send_error(404)
 
@@ -738,6 +794,36 @@ body {
   font-weight: normal;
 }
 
+/* Hide button */
+.session-item { position: relative; }
+.session-hide-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.session-item:hover .session-hide-btn { opacity: 1; }
+.session-hide-btn:hover { background: var(--bg-tertiary); color: var(--red); }
+.session-item.hidden-session { opacity: 0.4; }
+.show-hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.show-hidden-toggle input { cursor: pointer; }
+
 /* Search */
 .search-box {
   padding: 4px 8px;
@@ -749,6 +835,43 @@ body {
   width: 100%;
 }
 .search-box::placeholder { color: var(--text-secondary); }
+
+/* Search highlights */
+mark.search-hit {
+  background: #d2992244;
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+mark.search-hit.active {
+  background: var(--orange);
+  color: var(--bg);
+}
+.search-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-secondary);
+  position: sticky;
+  top: 0;
+  z-index: 11;
+}
+.search-nav button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.search-nav button:hover { background: var(--border); }
+.search-nav button:disabled { opacity: 0.3; cursor: default; }
+.search-nav .search-count { font-size: 12px; min-width: 80px; }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
@@ -764,7 +887,10 @@ body {
       <h1>Claude Code Sessions</h1>
       <select id="projectSelector" class="project-selector"></select>
       <input type="text" id="searchBox" class="search-box" placeholder="Search sessions...">
-      <div class="stats" id="globalStats"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="stats" id="globalStats"></div>
+        <label class="show-hidden-toggle"><input type="checkbox" id="showHidden" onchange="applyFilters()"> Show hidden</label>
+      </div>
     </div>
     <div class="session-list" id="sessionList"></div>
   </div>
@@ -802,8 +928,7 @@ async function loadProjects() {
 async function loadSessions() {
   const res = await fetch(`/api/sessions?project=${currentProject}`);
   allSessions = await res.json();
-  renderSessionList(allSessions);
-  updateGlobalStats(allSessions);
+  applyFilters();
 }
 
 function updateGlobalStats(sessions) {
@@ -835,7 +960,8 @@ function formatTime(ts) {
 function renderSessionList(sessions) {
   const list = document.getElementById('sessionList');
   list.innerHTML = sessions.map(s => `
-    <div class="session-item" data-id="${s.session_id}" onclick="loadSession('${s.session_id}')">
+    <div class="session-item ${s.hidden ? 'hidden-session' : ''}" data-id="${s.session_id}" onclick="loadSession('${s.session_id}')">
+      <button class="session-hide-btn" onclick="event.stopPropagation(); toggleHideSession('${s.session_id}', ${!s.hidden})" title="${s.hidden ? 'Unhide session' : 'Hide session'}">${s.hidden ? '&#x21a9;' : '&times;'}</button>
       <div class="timestamp">${formatDate(s.first_timestamp)}</div>
       <div class="preview">${escapeHtml(s.preview || '(no preview)')}</div>
       <div class="meta">
@@ -856,6 +982,8 @@ async function loadSession(sessionId) {
   const res = await fetch(`/api/session?id=${sessionId}&project=${currentProject}`);
   const session = await res.json();
   renderSession(session);
+  const q = document.getElementById('searchBox').value.trim();
+  if (q) applySearchHighlights(q);
 }
 
 function renderSession(session) {
@@ -1048,19 +1176,160 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// Search
-document.getElementById('searchBox').addEventListener('input', (e) => {
-  const q = e.target.value.toLowerCase();
-  if (!q) {
-    renderSessionList(allSessions);
-    return;
+// Filtering (search + hidden)
+function applyFilters() {
+  const q = document.getElementById('searchBox').value.toLowerCase();
+  const showHidden = document.getElementById('showHidden').checked;
+  let filtered = allSessions;
+  if (!showHidden) {
+    filtered = filtered.filter(s => !s.hidden);
   }
-  const filtered = allSessions.filter(s =>
-    (s.preview || '').toLowerCase().includes(q) ||
-    (s.git_branch || '').toLowerCase().includes(q) ||
-    (s.session_id || '').toLowerCase().includes(q)
-  );
+  if (q) {
+    filtered = filtered.filter(s =>
+      (s.searchable_text || '').toLowerCase().includes(q) ||
+      (s.git_branch || '').toLowerCase().includes(q) ||
+      (s.session_id || '').toLowerCase().includes(q)
+    );
+  }
   renderSessionList(filtered);
+  updateGlobalStats(filtered);
+}
+
+document.getElementById('searchBox').addEventListener('input', applyFilters);
+
+async function toggleHideSession(sessionId, hide) {
+  await fetch('/api/hide-session', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId, hide, project: currentProject}),
+  });
+  // Update local state
+  const s = allSessions.find(s => s.session_id === sessionId);
+  if (s) s.hidden = hide;
+  applyFilters();
+}
+
+// Search highlighting in conversation view
+let searchHits = [];
+let currentHitIndex = -1;
+
+function applySearchHighlights(query) {
+  searchHits = [];
+  currentHitIndex = -1;
+  if (!query) { removeSearchNav(); return; }
+
+  const conversation = document.querySelector('.conversation');
+  if (!conversation) return;
+
+  // Find all text nodes in .content elements (user and assistant text)
+  const contentEls = conversation.querySelectorAll('.turn-user .content, .turn-assistant .content, .tool-target');
+  const lowerQ = query.toLowerCase();
+
+  contentEls.forEach(el => {
+    highlightTextNodes(el, lowerQ);
+  });
+
+  searchHits = [...conversation.querySelectorAll('mark.search-hit')];
+  showSearchNav();
+  if (searchHits.length > 0) navigateHit(0);
+}
+
+function highlightTextNodes(el, query) {
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const matches = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const text = node.textContent.toLowerCase();
+    let idx = text.indexOf(query);
+    while (idx !== -1) {
+      matches.push({ node, index: idx });
+      idx = text.indexOf(query, idx + 1);
+    }
+  }
+  // Process in reverse to preserve indices
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const { node, index } = matches[i];
+    const mark = document.createElement('mark');
+    mark.className = 'search-hit';
+    const range = document.createRange();
+    range.setStart(node, index);
+    range.setEnd(node, index + query.length);
+    range.surroundContents(mark);
+  }
+}
+
+function showSearchNav() {
+  removeSearchNav();
+  const main = document.getElementById('mainContent');
+  const header = main.querySelector('.session-header');
+  if (!header) return;
+  const nav = document.createElement('div');
+  nav.className = 'search-nav';
+  nav.id = 'searchNav';
+  nav.innerHTML = `
+    <span class="search-count" id="searchCount">${searchHits.length} match${searchHits.length !== 1 ? 'es' : ''}</span>
+    <button onclick="navigateHit(currentHitIndex - 1)" id="prevHitBtn">&#9650; Prev</button>
+    <button onclick="navigateHit(currentHitIndex + 1)" id="nextHitBtn">&#9660; Next</button>
+  `;
+  header.after(nav);
+}
+
+function removeSearchNav() {
+  document.getElementById('searchNav')?.remove();
+}
+
+function navigateHit(index) {
+  if (searchHits.length === 0) return;
+  // Wrap around
+  if (index < 0) index = searchHits.length - 1;
+  if (index >= searchHits.length) index = 0;
+
+  // Deactivate previous
+  if (currentHitIndex >= 0 && currentHitIndex < searchHits.length) {
+    searchHits[currentHitIndex].classList.remove('active');
+  }
+  currentHitIndex = index;
+  const hit = searchHits[currentHitIndex];
+  hit.classList.add('active');
+
+  // Expand any collapsed turn containing this hit
+  const turn = hit.closest('.turn');
+  if (turn && turn.classList.contains('collapsed-turn')) {
+    turn.classList.remove('collapsed-turn');
+    turn.querySelector('.turn-arrow').innerHTML = '&#9660;';
+  }
+
+  // Expand any collapsed content containing this hit
+  const content = hit.closest('.content.collapsed');
+  if (content) {
+    content.classList.remove('collapsed');
+    const btn = content.parentElement.querySelector('.expand-btn');
+    if (btn) btn.textContent = 'Show less';
+  }
+
+  // Expand any hidden tool list containing this hit
+  const toolList = hit.closest('.tool-list.hidden');
+  if (toolList) {
+    toolList.classList.remove('hidden');
+    const btn = toolList.previousElementSibling;
+    if (btn) btn.querySelector('.arrow').innerHTML = '&#9660;';
+  }
+
+  // Scroll into view
+  hit.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  // Update counter
+  const countEl = document.getElementById('searchCount');
+  if (countEl) countEl.textContent = `${currentHitIndex + 1} / ${searchHits.length}`;
+}
+
+// Keyboard shortcuts for search navigation
+document.addEventListener('keydown', (e) => {
+  if (searchHits.length === 0) return;
+  if (e.key === 'F3' || (e.ctrlKey && e.key === 'g')) {
+    e.preventDefault();
+    navigateHit(e.shiftKey ? currentHitIndex - 1 : currentHitIndex + 1);
+  }
 });
 
 loadProjects();
