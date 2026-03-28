@@ -1,0 +1,2 @@
+Architect: FAILED - 1 violation found.
+[VIOLATION] src/backend/api/routes.py:33 - _LANG_TO_MARKET hardcoded as inline dict. Move to config file (e.g. config/markets/language_mapping.yaml) or a MarketResolver service. (Configuration Over Code)
