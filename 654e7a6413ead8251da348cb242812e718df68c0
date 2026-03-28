@@ -1,0 +1,4 @@
+Architect: FAILED - 3 violations found.
+[VIOLATION] src/mcp_servers/web_search_mcp/aggregator_db.py:20-37 - _DEFAULTS hardcodes aggregator URLs per market. Move to config/markets/aggregators.yaml. (Configuration Over Code)
+[VIOLATION] src/mcp_servers/web_search_mcp/search.py:64-70 - _MARKET_NAMES hardcoded inline. Move to shared market config. (Configuration Over Code)
+[VIOLATION] src/mcp_servers/results_processor_mcp/processor.py:9, web_search_mcp/search.py:15 - MCP cross-imports: QueryAttribute imported from product_criteria_mcp. Move to src/shared/models.py. (MCP Servers Are Independent)
