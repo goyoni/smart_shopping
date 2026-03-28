@@ -44,6 +44,7 @@ For the full product guideline including example tasks, UI specs, technical arch
 2. **Modular MCP Architecture** - Each MCP server is independently developable and testable.
 3. **Database Portability** - Always use SQLAlchemy ORM so SQLite and PostgreSQL are interchangeable.
 4. **Cache Strategy** - Hash-based cache keys: `hash(input + mcp_version)`. TTL-based expiration.
+5. **Multi-Market Extensibility** - All market-specific logic (currencies, languages, web sources) must be isolated in config/strategy files, never inline conditionals. See [docs/architecture_guidelines.md](docs/architecture_guidelines.md) for detailed rules and examples.
 
 ## Development Rules
 - All settings via environment variables (see `/config`)
@@ -73,7 +74,7 @@ Test-plan: pytest tests/unit -v (19 passed)
 ### Valid Sub-agent Values
 `/project:backend`, `/project:frontend`, `/project:mcp`, `/project:testing`,
 `/project:eval`, `/project:deploy-agent`, `/project:logging`, `/project:coordinator`,
-`/project:review`, `/project:sanity`
+`/project:architect`, `/project:review`, `/project:sanity`
 
 ## Environment Setup
 ```bash
@@ -129,6 +130,7 @@ The following custom slash commands are available as specialized sub-agents. Use
 | **Testing** | `/project:testing` | Unit tests (pytest), e2e tests (Jest + Playwright), MCP server tests |
 | **Eval** | `/project:eval` | Agent evaluation test cases, eval suite, regression detection |
 | **Deploy** | `/project:deploy-agent` | Shell scripts, environment setup, CI/CD, process management |
+| **Architect** | `/project:architect` | Architecture review: design alignment, multi-market extensibility, structural decisions |
 | **Review** | `/project:review` | Code review before commits, security checks, convention validation |
 | **Sanity** | `/project:sanity` | End-to-end local validation, service health checks, workflow testing |
 | **Logging** | `/project:logging` | Shared logging infrastructure, OTEL setup, session_id context |
@@ -140,6 +142,7 @@ The following custom slash commands are available as specialized sub-agents. Use
 - **After implementation:** Always run `/project:testing` if the implementing agent didn't write tests.
 - **Agent/MCP changes:** Run `/project:eval` to add evaluation test cases when agent behavior changes.
 - **Before every commit:** Run `/project:review` to check for security issues, missing tests, and convention violations.
+- **Architecture check:** Run `/project:architect` to validate design decisions align with architecture guidelines (especially after structural changes or new modules).
 - **Before merging:** Run `/project:sanity` to validate the full system works end-to-end.
 
 ## Commit Workflow

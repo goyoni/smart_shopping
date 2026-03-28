@@ -423,6 +423,9 @@ Each agent works in separate branch tagged with name.
 
 ## Key Design Principles
 
+### Multi-Market Extensibility
+All market-specific concerns (currencies, languages, web sources, formatting) must follow the isolation and extensibility patterns defined in [docs/architecture_guidelines.md](architecture_guidelines.md). No inline conditionals for market-varying behavior; use per-market config files and strategy patterns instead.
+
 ### Adaptive Web Automation
 - No hardcoded site-specific logic
 - Agent discovers e-commerce sites through search
