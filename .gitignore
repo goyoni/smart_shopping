@@ -36,6 +36,7 @@ Thumbs.db
 # Frontend build
 src/frontend/.next/
 src/frontend/out/
+*.tsbuildinfo
 
 # Test / Coverage
 .coverage
