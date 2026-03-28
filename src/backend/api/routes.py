@@ -15,6 +15,7 @@ from src.backend.db.models import ScrapingInstruction, SearchHistory, ShoppingLi
 from src.backend.websocket.handler import send_status
 from src.shared.geo import detect_market, get_client_ip
 from src.shared.logging import set_session_id
+from src.shared.market_config import get_lang_to_market_map
 from src.shared.models import (
     AddToShoppingListRequest,
     CrossSeller,
@@ -29,8 +30,6 @@ from src.shared.models import (
 )
 
 router = APIRouter()
-
-_LANG_TO_MARKET: dict[str, str] = {"he": "il", "ar": "il", "de": "de", "fr": "fr"}
 
 
 @router.get("/health")
@@ -51,7 +50,7 @@ async def search(request: SearchRequest, raw_request: Request) -> SearchResponse
         client_ip = get_client_ip(raw_request)
         market = detect_market(client_ip)
     if not market:
-        market = _LANG_TO_MARKET.get(request.language)
+        market = get_lang_to_market_map().get(request.language)
 
     agent = MainAgent(session_id=session_id, status_callback=send_status)
     state = await agent.process_query(

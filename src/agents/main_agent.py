@@ -20,6 +20,7 @@ from src.mcp_servers.product_criteria_mcp.criteria import (
     normalize_category,
     research_criteria,
 )
+from src.shared.market_config import get_all_category_aliases
 from src.mcp_servers.product_criteria_mcp.db_cache import get_cached, save_cached
 from src.mcp_servers.product_criteria_mcp.llm_criteria import (
     discover_criteria_via_llm,
@@ -52,69 +53,17 @@ StatusCallback = Callable[[str, str], Awaitable[None]]
 
 _MAX_SITES_TO_SCRAPE = 5
 
-# ---------------------------------------------------------------------------
-# Category extraction from query
-# ---------------------------------------------------------------------------
-
-_CATEGORY_KEYWORDS: dict[str, str] = {
-    # English
-    "refrigerator": "refrigerator",
-    "fridge": "refrigerator",
-    "microwave": "microwave",
-    "oven": "oven",
-    "stove": "stove",
-    "cooktop": "stove",
-    "washing machine": "washing_machine",
-    "washer": "washing_machine",
-    "dryer": "dryer",
-    "dishwasher": "dishwasher",
-    "television": "tv",
-    "tv": "tv",
-    "laptop": "laptop",
-    "notebook": "laptop",
-    "headphone": "headphones",
-    "headphones": "headphones",
-    "earbuds": "headphones",
-    "air conditioner": "air_conditioner",
-    "ac unit": "air_conditioner",
-    "vacuum": "vacuum",
-    "vacuum cleaner": "vacuum",
-    # Hebrew
-    "מקרר": "refrigerator",
-    "מיקרוגל": "microwave",
-    "תנור": "oven",
-    "כיריים": "stove",
-    "מכונת כביסה": "washing_machine",
-    "מייבש": "dryer",
-    "מדיח כלים": "dishwasher",
-    "מדיח": "dishwasher",
-    "טלוויזיה": "tv",
-    "מחשב נייד": "laptop",
-    "אוזניות": "headphones",
-    "מזגן": "air_conditioner",
-    "שואב אבק": "vacuum",
-    # Arabic
-    "ثلاجة": "refrigerator",
-    "ميكروويف": "microwave",
-    "فرن": "oven",
-    "غسالة": "washing_machine",
-    "غسالة صحون": "dishwasher",
-    "تلفزيون": "tv",
-    "حاسوب محمول": "laptop",
-    "سماعات": "headphones",
-    "مكيف": "air_conditioner",
-    "مكنسة كهربائية": "vacuum",
-}
-
 
 def extract_category(query: str) -> str | None:
     """Extract a product category from a search query using keyword matching.
 
     Returns the canonical category key or None if no category is detected.
     Checks longer keywords first to handle multi-word matches.
+    Category aliases are loaded from config/markets/languages.json.
     """
     text = query.lower().strip()
-    for keyword, category in sorted(_CATEGORY_KEYWORDS.items(), key=lambda x: -len(x[0])):
+    aliases = get_all_category_aliases()
+    for keyword, category in sorted(aliases.items(), key=lambda x: -len(x[0])):
         if keyword in text:
             return category
     return None
