@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
+from src.shared.models import QueryAttribute
 from src.mcp_servers.results_processor_mcp.processor import (
     aggregate_sellers,
     find_cross_sellers,

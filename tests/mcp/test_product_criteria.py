@@ -7,8 +7,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.mcp_servers.product_criteria_mcp.criteria import (
-    CriterionSpec,
-    QueryAttribute,
     extract_query_attributes,
     get_criteria,
     merge_criteria,
