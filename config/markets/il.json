@@ -1,0 +1,34 @@
+{
+  "code": "il",
+  "name": "Israel",
+  "language": "he",
+  "currency": {
+    "code": "ILS",
+    "symbol": "\u20AA"
+  },
+  "google_domain": "google.co.il",
+  "region_code": "il-he",
+  "buy_online_suffix": "\u05e7\u05e0\u05d9\u05d9\u05d4 \u05d0\u05d5\u05e0\u05dc\u05d9\u05d9\u05df",
+  "aggregators": [
+    {
+      "domain": "zap.co.il",
+      "url_template": "https://www.zap.co.il/search.aspx?keyword={query}",
+      "categories": ["appliances", "electronics"]
+    },
+    {
+      "domain": "ksp.co.il",
+      "url_template": "https://ksp.co.il/?select=search&q={query}",
+      "categories": ["electronics", "computers"]
+    },
+    {
+      "domain": "ivory.co.il",
+      "url_template": "https://www.ivory.co.il/catalog.php?act=cat&q={query}",
+      "categories": ["electronics", "appliances"]
+    },
+    {
+      "domain": "lastprice.co.il",
+      "url_template": "https://www.lastprice.co.il/search/{query}",
+      "categories": []
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "refrigerator": {
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "high", "description": "Operating noise in decibels"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency class"},
+    "capacity": {"display_name": "Capacity", "unit": "L", "importance": "high", "description": "Internal volume in liters"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": "Height x Width x Depth"},
+    "weight": {"display_name": "Weight", "unit": "kg", "importance": "low", "description": "Total weight"},
+    "freezer_type": {"display_name": "Freezer Type", "unit": "", "importance": "medium", "description": "Top, bottom, or side-by-side"},
+    "frost_free": {"display_name": "Frost Free", "unit": "", "importance": "medium", "description": "No-frost technology"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "medium", "description": "Manufacturer warranty period"}
+  },
+  "microwave": {
+    "power": {"display_name": "Power", "unit": "W", "importance": "high", "description": "Microwave power in watts"},
+    "capacity": {"display_name": "Capacity", "unit": "L", "importance": "high", "description": "Internal volume"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": "External dimensions"},
+    "weight": {"display_name": "Weight", "unit": "kg", "importance": "low", "description": "Total weight"},
+    "grill": {"display_name": "Grill Function", "unit": "", "importance": "medium", "description": "Has grill capability"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "medium", "description": "Energy efficiency"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "oven": {
+    "capacity": {"display_name": "Capacity", "unit": "L", "importance": "high", "description": "Internal volume"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "max_temperature": {"display_name": "Max Temperature", "unit": "\u00b0C", "importance": "medium", "description": "Maximum heating temperature"},
+    "cooking_modes": {"display_name": "Cooking Modes", "unit": "", "importance": "medium", "description": "Number of cooking programs"},
+    "self_cleaning": {"display_name": "Self Cleaning", "unit": "", "importance": "medium", "description": "Pyrolytic or catalytic cleaning"},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": ""},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "stove": {
+    "burners": {"display_name": "Burners", "unit": "", "importance": "high", "description": "Number of burners"},
+    "fuel_type": {"display_name": "Fuel Type", "unit": "", "importance": "high", "description": "Gas, electric, or induction"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": ""},
+    "power": {"display_name": "Power", "unit": "kW", "importance": "medium", "description": "Maximum burner power"},
+    "safety_features": {"display_name": "Safety Features", "unit": "", "importance": "medium", "description": "Gas shutoff, child lock"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "washing_machine": {
+    "capacity": {"display_name": "Capacity", "unit": "kg", "importance": "high", "description": "Load capacity in kg"},
+    "spin_speed": {"display_name": "Spin Speed", "unit": "RPM", "importance": "high", "description": "Maximum spin speed"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency"},
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "medium", "description": "Operating noise"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "water_consumption": {"display_name": "Water Consumption", "unit": "L", "importance": "medium", "description": "Per cycle"},
+    "programs": {"display_name": "Programs", "unit": "", "importance": "medium", "description": "Number of wash programs"},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": ""},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "dishwasher": {
+    "place_settings": {"display_name": "Place Settings", "unit": "", "importance": "high", "description": "Number of place settings"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency"},
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "high", "description": "Operating noise"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "water_consumption": {"display_name": "Water Consumption", "unit": "L", "importance": "medium", "description": "Per cycle"},
+    "programs": {"display_name": "Programs", "unit": "", "importance": "medium", "description": "Number of wash programs"},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": ""},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "tv": {
+    "screen_size": {"display_name": "Screen Size", "unit": "inches", "importance": "high", "description": "Diagonal screen size"},
+    "resolution": {"display_name": "Resolution", "unit": "", "importance": "high", "description": "4K, 8K, Full HD"},
+    "panel_type": {"display_name": "Panel Type", "unit": "", "importance": "high", "description": "OLED, QLED, LED, Mini-LED"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "refresh_rate": {"display_name": "Refresh Rate", "unit": "Hz", "importance": "medium", "description": "Screen refresh rate"},
+    "smart_tv": {"display_name": "Smart TV", "unit": "", "importance": "medium", "description": "OS and smart features"},
+    "hdmi_ports": {"display_name": "HDMI Ports", "unit": "", "importance": "low", "description": "Number of HDMI inputs"},
+    "hdr": {"display_name": "HDR", "unit": "", "importance": "medium", "description": "HDR support type"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "laptop": {
+    "processor": {"display_name": "Processor", "unit": "", "importance": "high", "description": "CPU model"},
+    "ram": {"display_name": "RAM", "unit": "GB", "importance": "high", "description": "Memory capacity"},
+    "storage": {"display_name": "Storage", "unit": "GB", "importance": "high", "description": "SSD/HDD capacity"},
+    "screen_size": {"display_name": "Screen Size", "unit": "inches", "importance": "high", "description": "Display diagonal"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "battery_life": {"display_name": "Battery Life", "unit": "hours", "importance": "medium", "description": "Estimated battery hours"},
+    "weight": {"display_name": "Weight", "unit": "kg", "importance": "medium", "description": "Device weight"},
+    "gpu": {"display_name": "GPU", "unit": "", "importance": "medium", "description": "Graphics card"},
+    "resolution": {"display_name": "Resolution", "unit": "", "importance": "medium", "description": "Display resolution"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "headphones": {
+    "driver_size": {"display_name": "Driver Size", "unit": "mm", "importance": "medium", "description": "Speaker driver diameter"},
+    "noise_cancelling": {"display_name": "Noise Cancelling", "unit": "", "importance": "high", "description": "ANC support"},
+    "battery_life": {"display_name": "Battery Life", "unit": "hours", "importance": "high", "description": "Playback time"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "connectivity": {"display_name": "Connectivity", "unit": "", "importance": "high", "description": "Bluetooth, wired, etc."},
+    "weight": {"display_name": "Weight", "unit": "g", "importance": "medium", "description": "Device weight"},
+    "water_resistance": {"display_name": "Water Resistance", "unit": "", "importance": "low", "description": "IP rating"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "air_conditioner": {
+    "cooling_capacity": {"display_name": "Cooling Capacity", "unit": "BTU", "importance": "high", "description": "Cooling power"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency"},
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "high", "description": "Indoor unit noise"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "coverage_area": {"display_name": "Coverage Area", "unit": "m\u00b2", "importance": "high", "description": "Recommended room size"},
+    "inverter": {"display_name": "Inverter", "unit": "", "importance": "medium", "description": "Inverter technology"},
+    "heating": {"display_name": "Heating", "unit": "", "importance": "medium", "description": "Heat pump capability"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "vacuum": {
+    "suction_power": {"display_name": "Suction Power", "unit": "W", "importance": "high", "description": "Suction strength"},
+    "battery_life": {"display_name": "Battery Life", "unit": "min", "importance": "high", "description": "Runtime for cordless"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "weight": {"display_name": "Weight", "unit": "kg", "importance": "medium", "description": "Device weight"},
+    "dust_capacity": {"display_name": "Dust Capacity", "unit": "L", "importance": "medium", "description": "Dustbin volume"},
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "medium", "description": "Operating noise"},
+    "filtration": {"display_name": "Filtration", "unit": "", "importance": "medium", "description": "HEPA or other filter type"},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  },
+  "dryer": {
+    "capacity": {"display_name": "Capacity", "unit": "kg", "importance": "high", "description": "Load capacity"},
+    "energy_rating": {"display_name": "Energy Rating", "unit": "", "importance": "high", "description": "Energy efficiency"},
+    "price": {"display_name": "Price", "unit": "", "importance": "high", "description": ""},
+    "dryer_type": {"display_name": "Dryer Type", "unit": "", "importance": "high", "description": "Condenser, heat pump, vented"},
+    "noise_level": {"display_name": "Noise Level", "unit": "dB", "importance": "medium", "description": "Operating noise"},
+    "programs": {"display_name": "Programs", "unit": "", "importance": "medium", "description": "Number of drying programs"},
+    "dimensions": {"display_name": "Dimensions", "unit": "cm", "importance": "medium", "description": ""},
+    "warranty": {"display_name": "Warranty", "unit": "years", "importance": "low", "description": ""}
+  }
+}

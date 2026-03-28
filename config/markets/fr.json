@@ -1,0 +1,24 @@
+{
+  "code": "fr",
+  "name": "France",
+  "language": "fr",
+  "currency": {
+    "code": "EUR",
+    "symbol": "\u20ac"
+  },
+  "google_domain": "google.fr",
+  "region_code": "fr-fr",
+  "buy_online_suffix": "acheter en ligne",
+  "aggregators": [
+    {
+      "domain": "amazon.fr",
+      "url_template": "https://www.amazon.fr/s?k={query}",
+      "categories": []
+    },
+    {
+      "domain": "fnac.com",
+      "url_template": "https://www.fnac.com/SearchResult/ResultList.aspx?Search={query}",
+      "categories": ["electronics", "media"]
+    }
+  ]
+}

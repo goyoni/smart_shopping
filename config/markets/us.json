@@ -1,0 +1,24 @@
+{
+  "code": "us",
+  "name": "United States",
+  "language": "en",
+  "currency": {
+    "code": "USD",
+    "symbol": "$"
+  },
+  "google_domain": "google.com",
+  "region_code": "us-en",
+  "buy_online_suffix": "buy online",
+  "aggregators": [
+    {
+      "domain": "amazon.com",
+      "url_template": "https://www.amazon.com/s?k={query}",
+      "categories": []
+    },
+    {
+      "domain": "bestbuy.com",
+      "url_template": "https://www.bestbuy.com/site/searchpage.jsp?st={query}",
+      "categories": ["electronics", "appliances"]
+    }
+  ]
+}

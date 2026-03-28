@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 from pydantic import BaseModel, Field
 
 from src.shared.config import settings
+
+
+@dataclass
+class CriterionSpec:
+    """Specification for a single product criterion."""
+
+    display_name: str
+    unit: str = ""
+    importance: str = "medium"
+    description: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "display_name": self.display_name,
+            "unit": self.unit,
+            "importance": self.importance,
+            "description": self.description,
+        }
+
+
+@dataclass
+class QueryAttribute:
+    """A user-intent attribute extracted from a search query."""
+
+    criterion_key: str
+    direction: str  # "low" or "high"
+    display_label: str
 
 
 class SearchStatus(str, Enum):

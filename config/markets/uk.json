@@ -1,0 +1,19 @@
+{
+  "code": "uk",
+  "name": "United Kingdom",
+  "language": "en",
+  "currency": {
+    "code": "GBP",
+    "symbol": "\u00a3"
+  },
+  "google_domain": "google.co.uk",
+  "region_code": "uk-en",
+  "buy_online_suffix": "buy online",
+  "aggregators": [
+    {
+      "domain": "amazon.co.uk",
+      "url_template": "https://www.amazon.co.uk/s?k={query}",
+      "categories": []
+    }
+  ]
+}

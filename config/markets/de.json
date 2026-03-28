@@ -1,0 +1,24 @@
+{
+  "code": "de",
+  "name": "Germany",
+  "language": "de",
+  "currency": {
+    "code": "EUR",
+    "symbol": "\u20ac"
+  },
+  "google_domain": "google.de",
+  "region_code": "de-de",
+  "buy_online_suffix": "online kaufen",
+  "aggregators": [
+    {
+      "domain": "amazon.de",
+      "url_template": "https://www.amazon.de/s?k={query}",
+      "categories": []
+    },
+    {
+      "domain": "mediamarkt.de",
+      "url_template": "https://www.mediamarkt.de/de/search.html?query={query}",
+      "categories": ["electronics", "appliances"]
+    }
+  ]
+}
