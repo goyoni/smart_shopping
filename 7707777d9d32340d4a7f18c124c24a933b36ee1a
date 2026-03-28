@@ -1,0 +1,2 @@
+Architect: FAILED - 1 violation found.
+[VIOLATION] src/frontend/components/CrossSellerSection.tsx:19, ModelSection.tsx:21 - currencySymbols duplicated again in new components. Centralize to src/frontend/lib/currency.ts. (Shared Code Goes in /src/shared)
