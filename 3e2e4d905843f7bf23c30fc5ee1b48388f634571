@@ -1,0 +1,3 @@
+Architect: FAILED - 2 violations found.
+[VIOLATION] Multiple files - currencySymbols constant duplicated across 5 files (ModelSection.tsx, ProductCard.tsx, shopping-list/page.tsx, SellerList.tsx, CrossSellerSection.tsx). Centralize to src/frontend/lib/currency.ts or use Intl.NumberFormat. (Shared Code Goes in /src/shared)
+[VIOLATION] src/frontend/lib/i18n.ts:42 - RTL_LOCALES hardcoded. Derive from market config instead. (Configuration Over Code)
