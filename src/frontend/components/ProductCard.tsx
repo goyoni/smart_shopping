@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { formatPrice } from "../lib/currency";
 import SellerList from "./SellerList";
 
 interface Seller {
@@ -29,23 +30,11 @@ interface ProductCardProps {
   onAddToList?: (product: ProductResultData) => void;
 }
 
-const currencySymbols: Record<string, string> = {
-  USD: "$",
-  ILS: "\u20AA",
-  EUR: "\u20AC",
-  GBP: "\u00A3",
-};
-
 function getBestPrice(sellers: Seller[]): { price: number; currency: string } | null {
   const priced = sellers.filter((s) => s.price != null);
   if (!priced.length) return null;
   priced.sort((a, b) => (a.price ?? 0) - (b.price ?? 0));
   return { price: priced[0].price!, currency: priced[0].currency };
-}
-
-function formatPrice(price: number, currency: string): string {
-  const symbol = currencySymbols[currency] || currency + " ";
-  return `${symbol}${price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function extractDomain(url: string): string {

@@ -1,5 +1,7 @@
 "use client";
 
+import { formatPrice } from "../lib/currency";
+
 interface Seller {
   name: string;
   price: number | null;
@@ -12,19 +14,6 @@ interface Seller {
 
 interface SellerListProps {
   sellers: Seller[];
-}
-
-const currencySymbols: Record<string, string> = {
-  USD: "$",
-  ILS: "\u20AA",
-  EUR: "\u20AC",
-  GBP: "\u00A3",
-};
-
-function formatPrice(price: number | null, currency: string): string {
-  if (price == null) return "N/A";
-  const symbol = currencySymbols[currency] || currency + " ";
-  return `${symbol}${price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function extractDomain(url: string): string {

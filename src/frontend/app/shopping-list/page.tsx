@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { formatPrice } from "../../lib/currency";
 import { useLocale } from "../../lib/LocaleContext";
 import { t } from "../../lib/i18n";
 
@@ -30,18 +31,6 @@ interface ShoppingListItemData {
   product: ProductResultData;
   quantity: number;
   notes: string | null;
-}
-
-const currencySymbols: Record<string, string> = {
-  USD: "$",
-  ILS: "\u20AA",
-  EUR: "\u20AC",
-  GBP: "\u00A3",
-};
-
-function formatPrice(price: number, currency: string): string {
-  const symbol = currencySymbols[currency] || currency + " ";
-  return `${symbol}${price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function getBestPrice(sellers: Seller[]): { price: number; currency: string } | null {

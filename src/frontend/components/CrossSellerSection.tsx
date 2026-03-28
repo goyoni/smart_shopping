@@ -1,5 +1,7 @@
 "use client";
 
+import { formatPrice } from "../lib/currency";
+
 interface CrossSellerData {
   name: string;
   domain: string;
@@ -14,18 +16,6 @@ interface CrossSellerData {
 
 interface CrossSellerSectionProps {
   crossSellers: CrossSellerData[];
-}
-
-const currencySymbols: Record<string, string> = {
-  USD: "$",
-  ILS: "\u20AA",
-  EUR: "\u20AC",
-  GBP: "\u00A3",
-};
-
-function formatPrice(price: number, currency: string): string {
-  const symbol = currencySymbols[currency] || currency + " ";
-  return `${symbol}${price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 export type { CrossSellerData };

@@ -1,5 +1,6 @@
 "use client";
 
+import { formatPrice } from "../lib/currency";
 import { type ProductResultData } from "./ProductCard";
 
 interface Seller {
@@ -16,19 +17,6 @@ interface ModelSectionProps {
   modelId: string;
   products: ProductResultData[];
   onAddToList?: (product: ProductResultData) => void;
-}
-
-const currencySymbols: Record<string, string> = {
-  USD: "$",
-  ILS: "\u20AA",
-  EUR: "\u20AC",
-  GBP: "\u00A3",
-};
-
-function formatPrice(price: number | null, currency: string): string {
-  if (price == null) return "N/A";
-  const symbol = currencySymbols[currency] || currency + " ";
-  return `${symbol}${price.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function extractDomain(url: string): string {

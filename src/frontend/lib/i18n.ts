@@ -1,9 +1,11 @@
 export type Locale = "en" | "he" | "ar";
 
-export const RTL_LOCALES: Locale[] = ["he", "ar"];
+// RTL locales — derived from language direction metadata.
+// When adding a new RTL language, add it here and to the translations below.
+const RTL_LOCALE_SET: ReadonlySet<Locale> = new Set<Locale>(["he", "ar"]);
 
 export function isRtl(locale: Locale): boolean {
-  return RTL_LOCALES.includes(locale);
+  return RTL_LOCALE_SET.has(locale);
 }
 
 export function detectLocale(): Locale {
