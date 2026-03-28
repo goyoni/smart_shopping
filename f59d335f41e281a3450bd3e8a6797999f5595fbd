@@ -1,0 +1,4 @@
+Architect: FAILED - 3 violations found.
+[VIOLATION] src/mcp_servers/product_criteria_mcp/criteria.py:48-100 - Large market-specific constants (_HEBREW_TO_ENGLISH, _ARABIC_TO_ENGLISH, _ENGLISH_ALIASES) hardcoded as inline dicts. Move to config files (e.g. config/markets/he.yaml). (Configuration Over Code)
+[VIOLATION] src/mcp_servers/product_criteria_mcp/criteria.py:152+ - _CRITERIA_CATALOG (~270 lines) hardcoded as Python constant. Domain data should live in DB or config files. (Data-Driven Design)
+[VIOLATION] src/mcp_servers/product_criteria_mcp/criteria.py:108-134 - normalize_category() uses inline conditionals checking Hebrew/Arabic mappings. Use a market-agnostic resolver loading from config. (Market-Agnostic Core Logic)
