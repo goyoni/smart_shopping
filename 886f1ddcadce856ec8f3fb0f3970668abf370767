@@ -1,0 +1,3 @@
+Architect: FAILED - 2 violations found.
+[VIOLATION] src/agents/main_agent.py:59-107 - _CATEGORY_KEYWORDS contains ~50 lines of hardcoded Hebrew/Arabic/English category mappings. Move to config files. (Configuration Over Code)
+[VIOLATION] src/agents/main_agent.py:17-43 - Agent imports directly from MCP server internals (criteria.py, processor.py, search.py, scraper.py). Should interact via MCP protocol interfaces, not internal imports. (MCP Servers Are Independent)
