@@ -6,7 +6,7 @@ import re
 from collections import defaultdict
 from urllib.parse import urlparse
 
-from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
+from src.shared.models import QueryAttribute
 from src.shared.logging import get_logger
 from src.shared.models import CrossSeller, ProductResult, Seller
 

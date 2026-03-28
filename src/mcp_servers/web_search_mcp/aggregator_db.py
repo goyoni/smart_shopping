@@ -10,31 +10,11 @@ from sqlalchemy import select
 from src.backend.db.engine import async_session
 from src.backend.db.models import AggregatorSite
 from src.shared.logging import get_logger
+from src.shared.market_config import get_default_aggregators
 
 logger = get_logger(__name__)
 
 _EMA_ALPHA = 0.3
-
-# Default seed data — inserted on first access when the table is empty.
-# ``categories``: empty list means "all categories" (general-purpose aggregator).
-_DEFAULTS: list[dict] = [
-    # Israel
-    {"domain": "zap.co.il", "url_template": "https://www.zap.co.il/search.aspx?keyword={query}", "market": "il", "categories": ["appliances", "electronics"]},
-    {"domain": "ksp.co.il", "url_template": "https://ksp.co.il/?select=search&q={query}", "market": "il", "categories": ["electronics", "computers"]},
-    {"domain": "ivory.co.il", "url_template": "https://www.ivory.co.il/catalog.php?act=cat&q={query}", "market": "il", "categories": ["electronics", "appliances"]},
-    {"domain": "lastprice.co.il", "url_template": "https://www.lastprice.co.il/search/{query}", "market": "il", "categories": []},
-    # US
-    {"domain": "amazon.com", "url_template": "https://www.amazon.com/s?k={query}", "market": "us", "categories": []},
-    {"domain": "bestbuy.com", "url_template": "https://www.bestbuy.com/site/searchpage.jsp?st={query}", "market": "us", "categories": ["electronics", "appliances"]},
-    # UK
-    {"domain": "amazon.co.uk", "url_template": "https://www.amazon.co.uk/s?k={query}", "market": "uk", "categories": []},
-    # Germany
-    {"domain": "amazon.de", "url_template": "https://www.amazon.de/s?k={query}", "market": "de", "categories": []},
-    {"domain": "mediamarkt.de", "url_template": "https://www.mediamarkt.de/de/search.html?query={query}", "market": "de", "categories": ["electronics", "appliances"]},
-    # France
-    {"domain": "amazon.fr", "url_template": "https://www.amazon.fr/s?k={query}", "market": "fr", "categories": []},
-    {"domain": "fnac.com", "url_template": "https://www.fnac.com/SearchResult/ResultList.aspx?Search={query}", "market": "fr", "categories": ["electronics", "media"]},
-]
 
 
 async def _seed_defaults() -> None:
@@ -44,7 +24,8 @@ async def _seed_defaults() -> None:
         if count_result.scalar_one_or_none() is not None:
             return  # Already seeded
 
-        for entry in _DEFAULTS:
+        defaults = get_default_aggregators()
+        for entry in defaults:
             record = AggregatorSite(
                 domain=entry["domain"],
                 url_template=entry["url_template"],
@@ -54,7 +35,7 @@ async def _seed_defaults() -> None:
             )
             session.add(record)
         await session.commit()
-        logger.info("Seeded %d default aggregator sites", len(_DEFAULTS))
+        logger.info("Seeded %d default aggregator sites", len(defaults))
 
 
 async def get_aggregators(

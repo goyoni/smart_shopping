@@ -12,62 +12,22 @@ import litellm
 from curl_cffi.requests import AsyncSession
 from opentelemetry import trace
 
-from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
 from src.shared.config import settings
 from src.shared.logging import get_logger, get_tracer
+from src.shared.market_config import (
+    get_buy_online_suffix,
+    get_google_domain,
+    get_language_name,
+    get_market_language,
+    get_market_name,
+    get_region_code,
+)
+from src.shared.models import QueryAttribute
 
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
 
 _SEARCH_URL = "https://html.duckduckgo.com/html/"
-
-_BUY_ONLINE_SUFFIXES: dict[str, str] = {
-    "he": "קנייה אונליין",
-    "ar": "شراء عبر الإنترنت",
-    "en": "buy online",
-}
-
-# Market-specific buy-online overrides.  When the market is known to have
-# a dominant local language, use its shopping suffix regardless of the
-# user's browser language so that search results surface local sellers.
-_MARKET_BUY_ONLINE: dict[str, str] = {
-    "il": "קנייה אונליין",
-    "de": "online kaufen",
-    "fr": "acheter en ligne",
-}
-
-# Maps a market to its dominant language.  Used to decide whether a
-# second localized search is needed when the query language differs.
-_MARKET_LANGUAGE: dict[str, str] = {
-    "il": "he",
-    "de": "de",
-    "fr": "fr",
-}
-
-# Google country-specific domains for browser-based search
-_GOOGLE_DOMAINS: dict[str, str] = {
-    "il": "google.co.il",
-    "uk": "google.co.uk",
-    "de": "google.de",
-    "fr": "google.fr",
-    "us": "google.com",
-}
-
-_LANG_NAMES: dict[str, str] = {
-    "he": "Hebrew",
-    "ar": "Arabic",
-    "en": "English",
-    "de": "German",
-    "fr": "French",
-}
-
-_MARKET_NAMES: dict[str, str] = {
-    "il": "Israel",
-    "us": "United States",
-    "uk": "United Kingdom",
-    "de": "Germany",
-    "fr": "France",
-}
 
 
 async def _translate_query(query: str, target_lang: str) -> str | None:
@@ -78,7 +38,7 @@ async def _translate_query(query: str, target_lang: str) -> str | None:
     if not settings.llm_api_key:
         return None
 
-    target_name = _LANG_NAMES.get(target_lang, target_lang)
+    target_name = get_language_name(target_lang)
     try:
         response = await litellm.acompletion(
             model=settings.llm_model,
@@ -103,13 +63,6 @@ async def _translate_query(query: str, target_lang: str) -> str | None:
         logger.warning("Query translation to %s failed", target_name, exc_info=True)
     return None
 
-_REGION_CODES: dict[str, str] = {
-    "il": "il-he",
-    "uk": "uk-en",
-    "de": "de-de",
-    "fr": "fr-fr",
-    "us": "us-en",
-}
 
 _REQUEST_HEADERS = {
     "User-Agent": (
@@ -187,13 +140,9 @@ def build_refined_query(
 
     # If we have a category, remove category aliases from remaining text too
     if category:
-        # Remove the canonical category and common aliases
-        from src.mcp_servers.product_criteria_mcp.criteria import (
-            _ENGLISH_ALIASES,
-            _HEBREW_TO_ENGLISH,
-            _ARABIC_TO_ENGLISH,
-        )
-        all_aliases = list(_ENGLISH_ALIASES.keys()) + list(_HEBREW_TO_ENGLISH.keys()) + list(_ARABIC_TO_ENGLISH.keys())
+        from src.shared.market_config import get_all_category_aliases
+
+        all_aliases = list(get_all_category_aliases().keys())
         # Also include the canonical name itself
         all_aliases.append(category)
         all_aliases.append(category.replace("_", " "))
@@ -228,11 +177,10 @@ def build_search_url(
     for URL construction.
     """
     search_text = refined_query if refined_query else query
-    # Prefer market-specific suffix to surface local sellers, then language
-    suffix = _MARKET_BUY_ONLINE.get(market) or _BUY_ONLINE_SUFFIXES.get(language, "buy online")
+    suffix = get_buy_online_suffix(language=language, market=market)
     augmented_query = f"{search_text} {suffix}"
     encoded = quote_plus(augmented_query)
-    kl = _REGION_CODES.get(market, "us-en")
+    kl = get_region_code(market)
     return f"{_SEARCH_URL}?q={encoded}&kl={kl}"
 
 
@@ -366,7 +314,7 @@ async def search_products(
     logger.info("Starting search for '%s' (language=%s, market=%s)", query, language, market)
 
     # Determine if a second localized search is needed
-    market_lang = _MARKET_LANGUAGE.get(market)
+    market_lang = get_market_language(market)
     need_local_search = market_lang is not None and market_lang != language
 
     if need_local_search:
@@ -432,12 +380,12 @@ async def search_products_via_browser(
     from src.shared.browser import get_page  # avoid circular at module level
 
     search_text = refined_query or query
-    google_domain = _GOOGLE_DOMAINS.get(market, "google.com")
-    suffix = _MARKET_BUY_ONLINE.get(market) or _BUY_ONLINE_SUFFIXES.get(language, "buy online")
+    google_domain = get_google_domain(market)
+    suffix = get_buy_online_suffix(language=language, market=market)
     search_url = f"https://www.{google_domain}/search?q={quote_plus(f'{search_text} {suffix}')}"
 
     locale = f"{language}-{market.upper()}"
-    market_lang = _MARKET_LANGUAGE.get(market)
+    market_lang = get_market_language(market)
     if market_lang and market_lang != language:
         locale = f"{market_lang}-{market.upper()}"
 
@@ -474,6 +422,7 @@ async def search_products_via_browser(
                         continue
 
                     # Skip Google's own links
+                    from urllib.parse import urlparse
                     parsed = urlparse(href)
                     host = parsed.hostname or ""
                     if any(g in host for g in ("google.", "gstatic.", "googleapis.", "youtube.")):
@@ -556,7 +505,7 @@ async def discover_aggregators(
     if not settings.llm_api_key:
         return []
 
-    market_name = _MARKET_NAMES.get(market, market.upper())
+    market_name = get_market_name(market)
     try:
         response = await litellm.acompletion(
             model=settings.llm_model,

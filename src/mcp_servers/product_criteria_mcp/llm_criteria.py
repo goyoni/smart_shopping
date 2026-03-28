@@ -7,7 +7,7 @@ import re
 
 import litellm
 
-from src.mcp_servers.product_criteria_mcp.criteria import QueryAttribute
+from src.shared.models import QueryAttribute
 from src.shared.config import settings
 from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
 
