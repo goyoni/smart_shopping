@@ -1,0 +1,3 @@
+Architect: FAILED - 2 violations found.
+[VIOLATION] src/mcp_servers/web_search_mcp/search.py:24-70 - Multiple market-specific constants hardcoded (_BUY_ONLINE_SUFFIXES, _MARKET_BUY_ONLINE, _MARKET_LANGUAGE, _GOOGLE_DOMAINS, _LANG_NAMES, _MARKET_NAMES, _REGION_CODES). Move to config/markets/. (Configuration Over Code)
+[VIOLATION] src/mcp_servers/product_criteria_mcp/criteria.py:314-351 - _QUERY_ATTRIBUTE_MAP embeds multi-language translations (Hebrew, Arabic) inline. Externalize to language-specific config files. (Configuration Over Code)
