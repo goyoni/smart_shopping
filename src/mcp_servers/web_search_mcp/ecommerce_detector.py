@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from src.shared.logging import get_logger
+from src.shared.market_config import get_market_tld, get_marketplace_domain_map
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,8 @@ _NON_ECOMMERCE_DOMAINS: set[str] = {
     "twitter.com", "x.com", "instagram.com", "linkedin.com",
     "tiktok.com", "pinterest.com", "quora.com", "medium.com",
     "github.com", "stackoverflow.com", "bbc.com", "cnn.com",
+    # Manual / documentation sites
+    "manualslib.com", "manuals.co.uk", "manua.ls",
 }
 
 _ECOMMERCE_PATH_PATTERNS: list[str] = [
@@ -151,16 +154,22 @@ def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceS
 
 def identify_ecommerce_sites(
     urls_data: list[dict[str, str]],
+    market: str | None = None,
 ) -> list[EcommerceSignal]:
     """Filter and sort URLs by e-commerce confidence.
 
     Args:
         urls_data: List of dicts with 'url', optionally 'title' and 'snippet'.
+        market: Target market code (e.g. 'il'). When provided,
+            country-specific marketplace variants (Amazon.dk, eBay.it, etc.)
+            that don't match the target market are penalized.
 
     Returns:
         E-commerce URLs sorted by confidence descending.
     """
     results: list[EcommerceSignal] = []
+    market_tld = get_market_tld(market) if market else None
+    marketplace_domains = get_marketplace_domain_map()
 
     for item in urls_data:
         url = item.get("url", "")
@@ -168,6 +177,17 @@ def identify_ecommerce_sites(
         snippet = item.get("snippet", "")
         signal = detect_ecommerce(url, title, snippet)
         if signal.is_ecommerce:
+            # Penalize country-specific marketplace domains that don't match
+            # the target market (e.g. amazon.dk when searching in Israel)
+            if market:
+                domain_market = marketplace_domains.get(signal.domain)
+                if domain_market and domain_market != market:
+                    signal.confidence *= 0.1
+                    signal.signals.append(f"market_mismatch:{signal.domain}!={market}")
+                # Boost domains matching the target market TLD
+                elif market_tld and signal.domain.endswith(market_tld):
+                    signal.confidence = min(signal.confidence + 0.2, 1.0)
+                    signal.signals.append(f"market_match:{market_tld}")
             results.append(signal)
 
     results.sort(key=lambda s: s.confidence, reverse=True)

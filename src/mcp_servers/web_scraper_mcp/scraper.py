@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import re
 from urllib.parse import urljoin, urlparse
 
-from playwright.async_api import Browser
+from playwright.async_api import Browser, Response
 
 from src.mcp_servers.web_scraper_mcp.db_cache import (
     get_cached_strategy,
@@ -16,6 +17,7 @@ from src.mcp_servers.web_scraper_mcp.db_cache import (
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy, discover_strategy
 from src.shared.browser import get_page
 from src.shared.logging import get_logger
+from src.shared.market_config import get_default_currency_for_domain, get_garbage_names
 from src.shared.models import ProductResult, Seller
 
 logger = get_logger(__name__)
@@ -36,6 +38,42 @@ _NEXT_PAGE_CANDIDATES: list[str] = [
     "nav[aria-label*='pagination'] a:last-child",
     "[class*='pagination'] a:last-child",
 ]
+
+# ---------------------------------------------------------------------------
+# JSON API response interception — field name candidates
+# ---------------------------------------------------------------------------
+_NAME_FIELDS = {"name", "title", "product_name", "productName", "item_name",
+                "itemName", "ProductName", "Name", "Title", "HeadLine",
+                "headline", "label", "Label", "displayName"}
+_PRICE_FIELDS = {"price", "Price", "cost", "amount", "min_price", "minPrice",
+                 "lowPrice", "finalPrice", "priceValue", "ProductPrice",
+                 "MinPrice", "SalePrice", "salePrice", "OriginalPrice",
+                 "originalPrice", "unitPrice", "PriceValue"}
+_MODEL_FIELDS = {"sku", "model", "mpn", "model_id", "modelId", "product_id",
+                 "productId", "SKU", "MPN", "Sku", "Model", "catalogNumber",
+                 "CatalogNumber", "barcode", "Barcode", "sku_id", "skuId"}
+_IMAGE_FIELDS = {"image", "img", "imageUrl", "image_url", "thumbnail",
+                 "photo", "ImageUrl", "ProductImage", "mainImage",
+                 "MainImage", "pictureUrl", "PictureUrl"}
+_BRAND_FIELDS = {"brand", "manufacturer", "Brand", "BrandName", "brandName",
+                 "Manufacturer", "vendorName", "VendorName"}
+_CURRENCY_FIELDS = {"currency", "currencyCode", "currency_code",
+                    "priceCurrency", "CurrencyCode"}
+_SELLER_ARRAY_FIELDS = {"sellers", "stores", "shops", "offers", "prices",
+                        "vendors", "Stores", "Sellers", "Offers", "Prices",
+                        "StoreOffers", "storeOffers"}
+_SELLER_NAME_FIELDS = {"name", "storeName", "store_name", "shopName",
+                       "shop_name", "sellerName", "seller_name", "Name",
+                       "StoreName", "ShopName"}
+_SELLER_URL_FIELDS = {"url", "link", "storeUrl", "store_url", "shopUrl",
+                      "Url", "Link", "StoreUrl"}
+
+# Tracking/analytics domains to ignore during response interception
+_IGNORE_DOMAINS = {
+    "google-analytics.com", "googletagmanager.com", "facebook.com",
+    "doubleclick.net", "analytics.", "hotjar.com", "clarity.ms",
+    "sentry.io", "newrelic.com", "segment.com", "mixpanel.com",
+}
 
 
 def extract_specs_from_text(
@@ -107,6 +145,31 @@ def parse_price(text: str) -> float | None:
         return None
 
 
+def _detect_page_type(url: str) -> str:
+    """Classify a URL into a page type for strategy caching."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+
+    # Product detail pages
+    if any(x in path for x in ("/product/", "/item/", "/model", "/dp/", "/p/")):
+        return "product"
+    if any(x in query for x in ("productid=", "modelid=", "pid=", "itemid=")):
+        return "product"
+
+    # Search results pages
+    if any(x in path for x in ("/search", "/find", "/results")):
+        return "search"
+    if any(x in query for x in ("q=", "query=", "search=", "keyword=")):
+        return "search"
+
+    # Category/catalog pages
+    if any(x in path for x in ("/catalog", "/category", "/cat/")):
+        return "catalog"
+
+    return "page"
+
+
 async def _find_next_page_url(page: object, base_url: str) -> str | None:
     """Detect a 'next page' link on the current page."""
     for selector in _NEXT_PAGE_CANDIDATES:
@@ -131,56 +194,165 @@ async def scrape_page(
 ) -> list[ProductResult]:
     """Scrape a product listing page using cached or newly discovered strategy.
 
-    1. Navigate to page
+    1. Navigate to page (intercepting API responses)
     2. Check for cached strategy
     3. If cached: use it; on failure re-discover
     4. If not cached: discover strategy
     5. Extract products
-    6. Follow pagination links for additional pages
+    6. Fallback: extract from intercepted API responses
+    7. Fallback: extract from JSON-LD / OG meta
+    8. Follow pagination links for additional pages
     """
     domain = extract_domain(url)
+    page_type = _detect_page_type(url)
 
     async with get_page(browser, locale=locale) as page:
+        # Set up API response interception BEFORE navigation
+        captured_responses: list[dict] = []
+
+        async def _on_response(response: Response) -> None:
+            try:
+                resp_url = response.url
+                # Skip tracking/analytics
+                if any(d in resp_url for d in _IGNORE_DOMAINS):
+                    return
+                ct = response.headers.get("content-type", "")
+                if "json" not in ct or response.status != 200:
+                    return
+                # Skip large responses (>500KB)
+                cl = response.headers.get("content-length", "")
+                if cl and int(cl) > 500_000:
+                    return
+                body = await response.body()
+                if len(body) > 500_000:
+                    return
+                data = _json.loads(body)
+                captured_responses.append({"url": resp_url, "data": data})
+            except Exception:
+                pass
+
+        page.on("response", _on_response)
+
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except Exception:
             logger.warning("Failed to navigate to %s", url)
             return []
 
-        # Wait for content
+        # Wait for content — first networkidle, then look for price indicators
         try:
             await page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
             pass  # Continue even if not fully idle
 
+        # Wait for dynamic product content (JS-heavy sites like ksp, zap)
+        try:
+            await page.wait_for_selector(
+                "[class*='price'], [class*='Price'], [data-price], "
+                "[class*='product'], [class*='Product']",
+                timeout=5000,
+            )
+        except Exception:
+            pass  # May not have visible price elements yet
+
         # Try cached strategy first
-        cached = await get_cached_strategy(domain)
+        cached = await get_cached_strategy(domain, page_type)
         strategy: ScrapingStrategy | None = None
+        products: list[ProductResult] = []
         if cached:
-            logger.info("Using cached strategy for %s", domain)
-            products = await _extract_with_strategy(page, cached, url, criteria=criteria)
+            logger.info("Using cached strategy for %s/%s", domain, page_type)
+            if cached.discovery_method == "api_intercept":
+                # For API strategies, extract from captured responses
+                products = _extract_from_api_responses(
+                    captured_responses, url, domain, product_query,
+                )
+            else:
+                products = await _extract_with_strategy(page, cached, url, criteria=criteria)
             if products:
-                await update_success_rate(domain, success=True)
+                await update_success_rate(domain, success=True, page_type=page_type)
                 strategy = cached
             else:
-                logger.info("Cached strategy failed for %s, re-discovering", domain)
-                await update_success_rate(domain, success=False)
+                logger.info("Cached strategy failed for %s/%s, re-discovering", domain, page_type)
+                await update_success_rate(domain, success=False, page_type=page_type)
 
         if strategy is None:
             # Discover new strategy
             strategy = await discover_strategy(page, product_query, criteria=criteria)
-            if not strategy:
-                logger.warning("No strategy discovered for %s", domain)
-                return []
+            if strategy:
+                products = await _extract_with_strategy(page, strategy, url, criteria=criteria)
 
-            # Save strategy
-            await save_strategy(domain, strategy)
+                # Quality check: if multiple products share the same name and
+                # none have prices, the strategy latched onto nav/UI elements.
+                if products and len(products) >= 2:
+                    names = [p.name for p in products]
+                    most_common = max(set(names), key=names.count)
+                    if names.count(most_common) >= len(products) * 0.5:
+                        has_any_price = any(
+                            s.price is not None
+                            for p in products for s in p.sellers
+                        )
+                        if not has_any_price:
+                            logger.warning(
+                                "Strategy for %s extracted %d products with duplicate name '%s' and no prices — discarding",
+                                domain, len(products), most_common[:50],
+                            )
+                            products = []
 
-            # Extract products from first page
-            products = await _extract_with_strategy(page, strategy, url, criteria=criteria)
+                if products:
+                    await save_strategy(domain, strategy, page_type)
+
+            # Fallback 1: intercepted API responses
+            if not products and captured_responses:
+                api_products = _extract_from_api_responses(
+                    captured_responses, url, domain, product_query,
+                )
+                if api_products:
+                    logger.info(
+                        "Extracted %d products from API responses for %s",
+                        len(api_products), domain,
+                    )
+                    products = api_products
+                    # Save an API strategy marker so next time we use interception directly
+                    api_strategy = ScrapingStrategy(
+                        product_container="",
+                        discovery_method="api_intercept",
+                    )
+                    await save_strategy(domain, api_strategy, page_type)
+
+            # Fallback 2: JSON-LD / OG meta tags
             if not products:
-                logger.warning("Strategy discovered but no products extracted from %s", url)
+                fallback = await _extract_jsonld_product(page, url, domain)
+                if fallback:
+                    logger.info("Extracted product from JSON-LD/meta for %s", domain)
+                    return [fallback]
+                if not strategy:
+                    logger.warning("No strategy discovered for %s", domain)
+                else:
+                    logger.warning("Strategy discovered but no products extracted from %s", url)
                 return []
+
+        # If no products match the search query, try JSON-LD as a fallback
+        # (CSS strategy may have grabbed sidebar/related items instead of the
+        # main product on a detail page).
+        if product_query and products:
+            query_lower = product_query.lower()
+            has_match = any(
+                query_lower in p.name.lower() or
+                (p.model_id and query_lower in p.model_id.lower())
+                for p in products
+            )
+            if not has_match:
+                fallback = await _extract_jsonld_product(page, url, domain)
+                if fallback and (
+                    query_lower in fallback.name.lower() or
+                    (fallback.model_id and query_lower in fallback.model_id.lower()) or
+                    query_lower in url.lower()
+                ):
+                    logger.info(
+                        "CSS strategy returned unrelated products for %s, using JSON-LD instead",
+                        domain,
+                    )
+                    products = [fallback]
 
         # Paginate: follow next-page links for additional results
         visited = {url}
@@ -212,6 +384,295 @@ async def scrape_page(
             logger.info("Page %d: extracted %d products from %s", page_num, len(page_products), domain)
 
         return products[:_MAX_PRODUCTS_PER_SITE]
+
+
+# ---------------------------------------------------------------------------
+# API response extraction (for JS SPA sites)
+# ---------------------------------------------------------------------------
+
+
+def _extract_from_api_responses(
+    responses: list[dict],
+    page_url: str,
+    domain: str,
+    product_query: str = "",
+) -> list[ProductResult]:
+    """Extract products from intercepted XHR/fetch JSON responses.
+
+    Recursively searches JSON structures for objects with product-like fields
+    (name + price). Works for both single-product detail APIs and multi-product
+    listing APIs, including price-comparison sites with seller arrays.
+    """
+    all_products: list[ProductResult] = []
+    query_lower = product_query.lower() if product_query else ""
+
+    for resp in responses:
+        data = resp["data"]
+        found = _find_products_in_json(data, domain, page_url, query_lower)
+        all_products.extend(found)
+
+    # Deduplicate by name
+    seen: set[str] = set()
+    unique: list[ProductResult] = []
+    for p in all_products:
+        key = p.name.lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
+    return unique[:_MAX_PRODUCTS_PER_SITE]
+
+
+def _find_products_in_json(
+    data: object,
+    domain: str,
+    page_url: str,
+    query_lower: str = "",
+    depth: int = 0,
+) -> list[ProductResult]:
+    """Recursively search JSON for product-like objects."""
+    if depth > 6:
+        return []
+
+    if isinstance(data, dict):
+        # Check if this dict looks like a product
+        has_name = any(k in data for k in _NAME_FIELDS)
+        has_price = any(k in data for k in _PRICE_FIELDS)
+
+        if has_name and has_price:
+            product = _dict_to_product(data, domain, page_url)
+            if product:
+                return [product]
+
+        # Check if this dict has a seller/store array (price comparison pattern)
+        has_sellers = any(k in data for k in _SELLER_ARRAY_FIELDS)
+        if has_name and has_sellers:
+            product = _dict_to_product_with_sellers(data, domain, page_url)
+            if product:
+                return [product]
+
+        # Look for arrays of products inside this dict
+        for key, value in data.items():
+            if isinstance(value, list) and len(value) >= 1:
+                products = []
+                for item in value:
+                    if isinstance(item, dict):
+                        sub = _find_products_in_json(item, domain, page_url, query_lower, depth + 1)
+                        products.extend(sub)
+                if products:
+                    return products
+
+        # Recurse into nested dicts
+        for key, value in data.items():
+            if isinstance(value, dict):
+                products = _find_products_in_json(value, domain, page_url, query_lower, depth + 1)
+                if products:
+                    return products
+
+    elif isinstance(data, list):
+        products = []
+        for item in data:
+            sub = _find_products_in_json(item, domain, page_url, query_lower, depth + 1)
+            products.extend(sub)
+        return products
+
+    return []
+
+
+def _get_field(obj: dict, candidates: set[str]) -> object | None:
+    """Get the first matching field value from a dict."""
+    for field in candidates:
+        if field in obj:
+            return obj[field]
+    return None
+
+
+def _extract_price_value(obj: dict) -> tuple[float | None, str]:
+    """Extract price and currency from a dict that may contain nested price objects."""
+    currency = ""
+
+    # Try currency field first
+    cur_val = _get_field(obj, _CURRENCY_FIELDS)
+    if isinstance(cur_val, str):
+        currency = cur_val
+
+    raw = _get_field(obj, _PRICE_FIELDS)
+    if raw is None:
+        return None, currency
+
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw), currency
+    if isinstance(raw, str):
+        price = parse_price(raw)
+        if price and price > 0:
+            if not currency:
+                currency = _detect_currency_from_text(raw)
+            return price, currency
+    if isinstance(raw, dict):
+        # Nested price object: {"value": 1234, "currency": "ILS"}
+        for subfield in ("value", "amount", "price", "raw", "final", "net"):
+            if subfield in raw:
+                sv = raw[subfield]
+                if isinstance(sv, (int, float)) and sv > 0:
+                    price = float(sv)
+                elif isinstance(sv, str):
+                    price = parse_price(sv)
+                else:
+                    continue
+                if price and price > 0:
+                    if not currency:
+                        cur_sub = _get_field(raw, _CURRENCY_FIELDS)
+                        if isinstance(cur_sub, str):
+                            currency = cur_sub
+                    return price, currency
+
+    return None, currency
+
+
+def _dict_to_product(
+    obj: dict, domain: str, page_url: str,
+) -> ProductResult | None:
+    """Convert a JSON dict with product fields into a ProductResult."""
+    # Name
+    name_raw = _get_field(obj, _NAME_FIELDS)
+    if not isinstance(name_raw, str):
+        return None
+    name = name_raw.strip()
+    if not name or len(name) < 3:
+        return None
+
+    # Price + currency
+    price, currency = _extract_price_value(obj)
+    if not currency:
+        currency = get_default_currency_for_domain(domain)
+
+    # Model / SKU
+    model_raw = _get_field(obj, _MODEL_FIELDS)
+    model_id = str(model_raw).strip() if model_raw else None
+
+    # Brand
+    brand_raw = _get_field(obj, _BRAND_FIELDS)
+    brand = None
+    if isinstance(brand_raw, str):
+        brand = brand_raw.strip() or None
+    elif isinstance(brand_raw, dict) and "name" in brand_raw:
+        brand = brand_raw["name"]
+
+    # Image
+    img_raw = _get_field(obj, _IMAGE_FIELDS)
+    image_url = None
+    if isinstance(img_raw, str) and ("http" in img_raw or img_raw.startswith("/")):
+        image_url = img_raw
+    elif isinstance(img_raw, list) and img_raw and isinstance(img_raw[0], str):
+        image_url = img_raw[0]
+
+    # Product URL from the JSON (if present)
+    product_url = page_url
+    url_raw = _get_field(obj, {"url", "productUrl", "product_url", "link", "Link", "Url"})
+    if isinstance(url_raw, str) and ("http" in url_raw or url_raw.startswith("/")):
+        product_url = url_raw if url_raw.startswith("http") else urljoin(page_url, url_raw)
+
+    if not model_id:
+        key = f"{brand or ''}{name}".lower().strip()
+        model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+    seller = Seller(
+        name=domain,
+        price=price,
+        currency=currency,
+        url=product_url,
+    )
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        brand=brand,
+        image_url=image_url,
+        sellers=[seller],
+    )
+
+
+def _dict_to_product_with_sellers(
+    obj: dict, domain: str, page_url: str,
+) -> ProductResult | None:
+    """Convert a JSON dict with name + seller array into a ProductResult.
+
+    Used for price-comparison sites (zap, lastprice) where the API returns
+    a product with an array of sellers/stores, each with their own price.
+    """
+    name_raw = _get_field(obj, _NAME_FIELDS)
+    if not isinstance(name_raw, str) or len(name_raw.strip()) < 3:
+        return None
+    name = name_raw.strip()
+
+    # Find the seller array
+    seller_array = None
+    for field in _SELLER_ARRAY_FIELDS:
+        if field in obj and isinstance(obj[field], list):
+            seller_array = obj[field]
+            break
+    if not seller_array:
+        return None
+
+    # Extract sellers
+    sellers: list[Seller] = []
+    for seller_obj in seller_array:
+        if not isinstance(seller_obj, dict):
+            continue
+        s_name_raw = _get_field(seller_obj, _SELLER_NAME_FIELDS)
+        s_name = str(s_name_raw).strip() if s_name_raw else domain
+
+        s_price, s_currency = _extract_price_value(seller_obj)
+        if not s_currency:
+            s_currency = get_default_currency_for_domain(domain)
+
+        s_url_raw = _get_field(seller_obj, _SELLER_URL_FIELDS)
+        s_url = page_url
+        if isinstance(s_url_raw, str) and ("http" in s_url_raw or s_url_raw.startswith("/")):
+            s_url = s_url_raw if s_url_raw.startswith("http") else urljoin(page_url, s_url_raw)
+
+        if s_name or s_price is not None:
+            sellers.append(Seller(
+                name=s_name,
+                price=s_price,
+                currency=s_currency,
+                url=s_url,
+            ))
+
+    if not sellers:
+        return None
+
+    # Product-level fields
+    model_raw = _get_field(obj, _MODEL_FIELDS)
+    model_id = str(model_raw).strip() if model_raw else None
+    brand_raw = _get_field(obj, _BRAND_FIELDS)
+    brand = None
+    if isinstance(brand_raw, str):
+        brand = brand_raw.strip() or None
+    elif isinstance(brand_raw, dict) and "name" in brand_raw:
+        brand = brand_raw["name"]
+
+    img_raw = _get_field(obj, _IMAGE_FIELDS)
+    image_url = None
+    if isinstance(img_raw, str) and ("http" in img_raw or img_raw.startswith("/")):
+        image_url = img_raw
+
+    if not model_id:
+        key = f"{brand or ''}{name}".lower().strip()
+        model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        brand=brand,
+        image_url=image_url,
+        sellers=sellers,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CSS strategy extraction
+# ---------------------------------------------------------------------------
 
 
 async def _extract_with_strategy(
@@ -273,6 +734,10 @@ async def _extract_single_product(
             pass
 
     if not name:
+        return None
+
+    # Reject names that are clearly navigation/UI elements rather than products
+    if len(name) < 8 or name in get_garbage_names():
         return None
 
     # Extract price
@@ -395,16 +860,139 @@ async def _extract_single_product(
     )
 
 
-def _extract_price_from_text(text: str, default_currency: str = "USD") -> tuple[float | None, str]:
-    """Extract price from free text as a fallback when CSS selectors fail.
+# ---------------------------------------------------------------------------
+# JSON-LD / OG meta fallback
+# ---------------------------------------------------------------------------
 
-    Looks for currency symbol followed by a number, or a number followed by
-    a currency symbol/code.  Returns (price, currency).
+
+async def _extract_jsonld_product(
+    page: object,
+    url: str,
+    domain: str,
+) -> ProductResult | None:
+    """Extract product data from JSON-LD (schema.org/Product) or OG meta tags.
+
+    Many e-commerce sites embed structured data even when their DOM is
+    rendered via JavaScript and CSS selectors fail.
     """
+    try:
+        data = await page.evaluate("""() => {
+            // Try JSON-LD first
+            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+            for (const s of scripts) {
+                try {
+                    let obj = JSON.parse(s.textContent);
+                    // Handle @graph wrapper
+                    if (obj['@graph']) {
+                        for (const item of obj['@graph']) {
+                            if (item['@type'] === 'Product') { obj = item; break; }
+                        }
+                    }
+                    if (obj['@type'] === 'Product') {
+                        const offers = obj.offers || {};
+                        // offers can be an array or object
+                        const offer = Array.isArray(offers) ? offers[0] : offers;
+                        return {
+                            name: obj.name || '',
+                            brand: (obj.brand && obj.brand.name) || obj.brand || '',
+                            price: parseFloat(offer.price || offer.lowPrice || '0') || null,
+                            currency: offer.priceCurrency || '',
+                            image: obj.image || (Array.isArray(obj.image) ? obj.image[0] : ''),
+                            mpn: obj.mpn || obj.sku || obj.gtin13 || '',
+                        };
+                    }
+                } catch {}
+            }
+            // Fallback: OG meta tags + DOM price extraction
+            const getName = (sel) => {
+                const el = document.querySelector(sel);
+                return el ? el.getAttribute('content') || '' : '';
+            };
+            const ogTitle = getName('meta[property="og:title"]');
+
+            // Try to extract price from rendered DOM
+            let domPrice = null;
+            let domCurrency = '';
+            const pricePattern = /[$₪€£]\s*([\d,]+(?:\.\d{1,2})?)|(\d[\d,]*(?:\.\d{1,2})?)\s*[$₪€£]/;
+            const priceSelectors = [
+                '[class*="price"]', '[class*="Price"]',
+                '[data-price]', 'span[class*="amount"]',
+                '[class*="product-price"]', '[class*="ProductPrice"]',
+            ];
+            for (const sel of priceSelectors) {
+                const els = document.querySelectorAll(sel);
+                for (const el of els) {
+                    const text = (el.textContent || '').trim();
+                    const m = text.match(pricePattern);
+                    if (m) {
+                        domPrice = parseFloat((m[1] || m[2]).replace(/,/g, ''));
+                        if (text.includes('₪')) domCurrency = 'ILS';
+                        else if (text.includes('$')) domCurrency = 'USD';
+                        else if (text.includes('€')) domCurrency = 'EUR';
+                        break;
+                    }
+                }
+                if (domPrice) break;
+            }
+
+            if (ogTitle) {
+                return {
+                    name: ogTitle,
+                    brand: '',
+                    price: domPrice,
+                    currency: domCurrency,
+                    image: getName('meta[property="og:image"]'),
+                    mpn: '',
+                };
+            }
+            return null;
+        }""")
+    except Exception:
+        return None
+
+    if not data or not data.get("name"):
+        return None
+
+    name = data["name"].strip()
+    if len(name) < 8:
+        return None
+
+    price = data.get("price")
+    currency = data.get("currency") or ""
+    if not currency and price:
+        currency = get_default_currency_for_domain(domain)
+
+    seller = Seller(
+        name=domain,
+        price=price,
+        currency=currency,
+        url=url,
+    )
+
+    model_id = data.get("mpn") or None
+    if not model_id:
+        key = f"{data.get('brand', '')}{name}".lower().strip()
+        model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        brand=data.get("brand") or None,
+        image_url=data.get("image") or None,
+        sellers=[seller],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_price_from_text(text: str, default_currency: str = "USD") -> tuple[float | None, str]:
+    """Extract price from free text as a fallback when CSS selectors fail."""
     if not text:
         return None, default_currency
 
-    # Patterns: ₪1,234.56  |  $999  |  1,234.56 ₪  |  EUR 123
     patterns = [
         (r"₪\s*([\d,]+(?:\.\d{1,2})?)", "ILS"),
         (r"([\d,]+(?:\.\d{1,2})?)\s*₪", "ILS"),

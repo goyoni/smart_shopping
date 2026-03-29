@@ -2,6 +2,7 @@
   "code": "uk",
   "name": "United Kingdom",
   "language": "en",
+  "tld": ".co.uk",
   "currency": {
     "code": "GBP",
     "symbol": "\u00a3"
@@ -9,6 +10,10 @@
   "google_domain": "google.co.uk",
   "region_code": "uk-en",
   "buy_online_suffix": "buy online",
+  "marketplace_domains": {
+    "amazon.co.uk": "uk",
+    "ebay.co.uk": "uk"
+  },
   "aggregators": [
     {
       "domain": "amazon.co.uk",

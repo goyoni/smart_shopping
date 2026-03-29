@@ -2,6 +2,7 @@
   "code": "de",
   "name": "Germany",
   "language": "de",
+  "tld": ".de",
   "currency": {
     "code": "EUR",
     "symbol": "\u20ac"
@@ -9,6 +10,10 @@
   "google_domain": "google.de",
   "region_code": "de-de",
   "buy_online_suffix": "online kaufen",
+  "marketplace_domains": {
+    "amazon.de": "de",
+    "ebay.de": "de"
+  },
   "aggregators": [
     {
       "domain": "amazon.de",

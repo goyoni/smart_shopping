@@ -131,6 +131,96 @@ def get_lang_to_market_map() -> dict[str, str]:
     return mapping
 
 
+@lru_cache(maxsize=1)
+def _build_query_market_map() -> dict[str, str]:
+    """Build a mapping of country name/alias (lowercased) -> market code.
+
+    Used for detecting market from query text like "in israel".
+    """
+    mapping: dict[str, str] = {}
+    for code in get_all_market_codes():
+        try:
+            m = _load_market(code)
+            name = m.get("name", "").lower()
+            if name:
+                mapping[name] = code
+            # Also map the code itself
+            mapping[code] = code
+        except (FileNotFoundError, KeyError):
+            continue
+    return mapping
+
+
+def detect_market_from_query(query: str) -> str | None:
+    """Extract market from query text like 'in israel' or 'in germany'.
+
+    Returns the market code (e.g. 'il') or None if no market is detected.
+    """
+    import re
+
+    text = query.lower().strip()
+    market_map = _build_query_market_map()
+
+    # Match "in <country>" at the end or as a phrase within the query
+    for country_name, code in sorted(market_map.items(), key=lambda x: -len(x[0])):
+        pattern = rf"\bin\s+{re.escape(country_name)}\b"
+        if re.search(pattern, text):
+            return code
+
+    return None
+
+
+def get_market_tld(market: str) -> str | None:
+    """Return the country TLD for a market code (e.g. 'il' -> '.co.il')."""
+    try:
+        return _load_market(market).get("tld")
+    except (FileNotFoundError, KeyError):
+        return None
+
+
+@lru_cache(maxsize=1)
+def get_marketplace_domain_map() -> dict[str, str]:
+    """Build a mapping of marketplace domain -> market code from all market configs.
+
+    E.g. {"amazon.de": "de", "ebay.co.uk": "uk", ...}
+    Used to penalize marketplace domains that don't match the target market.
+    """
+    mapping: dict[str, str] = {}
+    for code in get_all_market_codes():
+        try:
+            m = _load_market(code)
+            for domain, market_code in m.get("marketplace_domains", {}).items():
+                mapping[domain] = market_code
+        except (FileNotFoundError, KeyError):
+            continue
+    return mapping
+
+
+def get_default_currency_for_domain(domain: str) -> str:
+    """Resolve a default currency code from a domain's TLD.
+
+    Falls back to "USD" if no market matches.
+    """
+    for code in get_all_market_codes():
+        try:
+            m = _load_market(code)
+            tld = m.get("tld", "")
+            if tld and domain.endswith(tld):
+                return m.get("currency", {}).get("code", "USD")
+        except (FileNotFoundError, KeyError):
+            continue
+    return "USD"
+
+
+def get_garbage_names() -> set[str]:
+    """Load UI/navigation garbage names from all languages in languages.json."""
+    langs = _load_languages()
+    names: set[str] = set()
+    for _lang, name_list in langs.get("garbage_names", {}).items():
+        names.update(name_list)
+    return names
+
+
 def get_currency_symbols() -> dict[str, str]:
     """Return a mapping of currency code to symbol from all markets."""
     symbols: dict[str, str] = {}

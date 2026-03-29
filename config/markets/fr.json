@@ -2,6 +2,7 @@
   "code": "fr",
   "name": "France",
   "language": "fr",
+  "tld": ".fr",
   "currency": {
     "code": "EUR",
     "symbol": "\u20ac"
@@ -9,6 +10,10 @@
   "google_domain": "google.fr",
   "region_code": "fr-fr",
   "buy_online_suffix": "acheter en ligne",
+  "marketplace_domains": {
+    "amazon.fr": "fr",
+    "ebay.fr": "fr"
+  },
   "aggregators": [
     {
       "domain": "amazon.fr",

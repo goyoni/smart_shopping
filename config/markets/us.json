@@ -2,6 +2,7 @@
   "code": "us",
   "name": "United States",
   "language": "en",
+  "tld": ".com",
   "currency": {
     "code": "USD",
     "symbol": "$"
@@ -9,6 +10,10 @@
   "google_domain": "google.com",
   "region_code": "us-en",
   "buy_online_suffix": "buy online",
+  "marketplace_domains": {
+    "amazon.com": "us",
+    "ebay.com": "us"
+  },
   "aggregators": [
     {
       "domain": "amazon.com",
