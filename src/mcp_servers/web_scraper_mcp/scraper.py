@@ -7,6 +7,8 @@ import json as _json
 import re
 from urllib.parse import urljoin, urlparse
 
+import httpx
+from bs4 import BeautifulSoup
 from playwright.async_api import Browser, Response
 
 from src.mcp_servers.web_scraper_mcp.db_cache import (
@@ -184,6 +186,254 @@ async def _find_next_page_url(page: object, base_url: str) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# HTTP pre-fetch — extract products from server-rendered HTML without a
+# browser.  Many sites (especially price-comparison aggregators) return
+# complete HTML via a simple GET.  This is faster and avoids anti-bot
+# detection triggered by headless browsers.
+# ---------------------------------------------------------------------------
+
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "he,en;q=0.9",
+}
+
+_HTTP_TIMEOUT = 15.0
+
+_BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]"}
+_BLOCKED_PREFIXES = ("10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                     "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+                     "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+                     "172.30.", "172.31.", "192.168.", "169.254.", "fe80::",
+                     "fc00::", "fd00::")
+
+
+def _is_safe_url(url: str) -> bool:
+    """Reject URLs targeting private/internal networks (SSRF protection)."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host or parsed.scheme not in ("http", "https"):
+        return False
+    if host in _BLOCKED_HOSTS:
+        return False
+    if any(host.startswith(p) for p in _BLOCKED_PREFIXES):
+        return False
+    return True
+
+
+async def _try_http_prefetch(
+    url: str, product_query: str, domain: str,
+) -> list[ProductResult] | None:
+    """Try to extract products from server-rendered HTML via HTTP GET.
+
+    Returns a list of products if successful, or None to signal that
+    the caller should fall back to Playwright-based scraping.
+    """
+    if not _is_safe_url(url):
+        return None
+    try:
+        async with httpx.AsyncClient(
+            headers=_HTTP_HEADERS,
+            follow_redirects=True,
+            timeout=_HTTP_TIMEOUT,
+        ) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return None
+    except Exception:
+        return None
+
+    html = resp.text
+    if len(html) < 1000:
+        return None
+
+    soup = BeautifulSoup(html, "lxml")
+
+    # Extract product name from page (h1, title, og:title)
+    page_product_name = _extract_page_product_name(soup)
+
+    # Try data-attribute based extraction (price-comparison pages)
+    products = _extract_from_data_attrs(soup, url, domain, page_product_name)
+    if products:
+        logger.info(
+            "HTTP pre-fetch extracted %d products from %s (data-attrs)",
+            len(products), domain,
+        )
+        return products
+
+    # Try JSON-LD extraction from static HTML
+    product = _extract_jsonld_from_soup(soup, url, domain)
+    if product:
+        logger.info("HTTP pre-fetch extracted product from %s (JSON-LD)", domain)
+        return [product]
+
+    return None
+
+
+def _extract_page_product_name(soup: BeautifulSoup) -> str:
+    """Extract the main product name from a page."""
+    h1 = soup.find("h1")
+    if h1:
+        text = h1.get_text(strip=True)
+        if text and len(text) < 300:
+            return text
+    og = soup.find("meta", property="og:title")
+    if og and og.get("content"):
+        return og["content"].strip()
+    title = soup.find("title")
+    if title:
+        return title.get_text(strip=True).split(" - ")[0].strip()
+    return ""
+
+
+def _extract_from_data_attrs(
+    soup: BeautifulSoup,
+    page_url: str,
+    domain: str,
+    page_product_name: str,
+) -> list[ProductResult]:
+    """Extract products from elements with data-product-price / data-site-name.
+
+    This handles price-comparison layouts where each row represents a seller.
+    """
+    # Find elements with data-product-price attribute
+    rows = soup.select("[data-product-price]")
+    if len(rows) < 2:
+        return []
+
+    currency = get_default_currency_for_domain(domain)
+    sellers: list[Seller] = []
+
+    for row in rows:
+        price_raw = row.get("data-product-price", "")
+        price = parse_price(price_raw)
+        if price is None or price <= 0:
+            continue
+
+        seller_name = row.get("data-site-name", domain)
+
+        # Try to extract seller URL from links inside the row
+        seller_url = page_url
+        link = row.select_one("a[href]")
+        if link and link.get("href"):
+            href = link["href"]
+            if href.startswith("/"):
+                seller_url = urljoin(page_url, href)
+            elif href.startswith("http"):
+                seller_url = href
+
+        sellers.append(Seller(
+            name=seller_name,
+            price=price,
+            currency=currency,
+            url=seller_url,
+        ))
+
+    if not sellers:
+        return []
+
+    # All sellers are for the same product on comparison pages
+    product_name = page_product_name or domain
+    model_id = None
+
+    # Try to extract model from page URL or name
+    if page_product_name:
+        # Look for alphanumeric model ID patterns in the name
+        model_match = re.search(r'\b([A-Z]{2,}[\d]{3,}[A-Z\d]*)\b', page_product_name)
+        if model_match:
+            model_id = model_match.group(1)
+
+    if not model_id:
+        key = page_product_name.lower().strip()
+        model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+    # Extract image from OG meta or page content
+    image_url = None
+    og_img = soup.find("meta", property="og:image")
+    if og_img and og_img.get("content"):
+        image_url = og_img["content"]
+
+    return [ProductResult(
+        name=product_name,
+        model_id=model_id,
+        image_url=image_url,
+        sellers=sellers,
+    )]
+
+
+def _extract_jsonld_from_soup(
+    soup: BeautifulSoup,
+    page_url: str,
+    domain: str,
+) -> ProductResult | None:
+    """Extract a product from JSON-LD script tags in static HTML."""
+    scripts = soup.select('script[type="application/ld+json"]')
+    for script in scripts:
+        try:
+            data = _json.loads(script.string or "")
+            if isinstance(data, dict) and data.get("@graph"):
+                for item in data["@graph"]:
+                    if isinstance(item, dict) and item.get("@type") == "Product":
+                        data = item
+                        break
+            if not isinstance(data, dict) or data.get("@type") != "Product":
+                continue
+
+            name = data.get("name", "").strip()
+            if not name or len(name) < 3:
+                continue
+
+            offers = data.get("offers", {})
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+
+            price_raw = offers.get("price") or offers.get("lowPrice")
+            price = float(price_raw) if price_raw else None
+            currency = offers.get("priceCurrency", "")
+            if not currency:
+                currency = get_default_currency_for_domain(domain)
+
+            model_id = data.get("mpn") or data.get("sku") or None
+            if not model_id:
+                key = f"{data.get('brand', {}).get('name', '')}{name}".lower()
+                model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+            brand_raw = data.get("brand")
+            brand = None
+            if isinstance(brand_raw, dict):
+                brand = brand_raw.get("name")
+            elif isinstance(brand_raw, str):
+                brand = brand_raw
+
+            image = data.get("image")
+            if isinstance(image, list):
+                image = image[0] if image else None
+
+            seller = Seller(
+                name=domain,
+                price=price,
+                currency=currency,
+                url=page_url,
+            )
+
+            return ProductResult(
+                name=name,
+                model_id=model_id,
+                brand=brand,
+                image_url=image,
+                sellers=[seller],
+            )
+        except Exception:
+            continue
+
+    return None
+
+
 async def scrape_page(
     browser: Browser,
     url: str,
@@ -206,6 +456,13 @@ async def scrape_page(
     domain = extract_domain(url)
     page_type = _detect_page_type(url)
 
+    # Try lightweight HTTP fetch before spinning up Playwright.
+    # Works well for server-rendered sites (e.g. price-comparison pages).
+    http_products = await _try_http_prefetch(url, product_query, domain)
+    if http_products:
+        logger.info("HTTP pre-fetch returned %d products for %s", len(http_products), url)
+        return http_products
+
     async with get_page(browser, locale=locale) as page:
         # Set up API response interception BEFORE navigation
         captured_responses: list[dict] = []
@@ -217,7 +474,14 @@ async def scrape_page(
                 if any(d in resp_url for d in _IGNORE_DOMAINS):
                     return
                 ct = response.headers.get("content-type", "")
-                if "json" not in ct or response.status != 200:
+                if response.status != 200:
+                    return
+                # Accept JSON responses (explicit json content-type) and
+                # also text/plain or text/html responses from API endpoints
+                # (some sites serve JSON with non-json content types).
+                is_json_ct = "json" in ct
+                is_api_url = any(s in resp_url for s in ("/api/", "/ajax/", "/graphql", "format=json", ".json"))
+                if not is_json_ct and not is_api_url:
                     return
                 # Skip large responses (>500KB)
                 cl = response.headers.get("content-length", "")
@@ -330,6 +594,12 @@ async def scrape_page(
                 else:
                     logger.warning("Strategy discovered but no products extracted from %s", url)
                 return []
+
+        # Comparison-page merge: if we extracted multiple "products" that
+        # are actually sellers for the same product, merge them.  This
+        # handles price-comparison layouts where each row is a seller.
+        if products and product_query:
+            products = _merge_comparison_sellers(products, product_query, domain)
 
         # If no products match the search query, try JSON-LD as a fallback
         # (CSS strategy may have grabbed sidebar/related items instead of the
@@ -723,9 +993,14 @@ async def _extract_single_product(
     1. CSS selectors from ``strategy.criteria_selectors`` (highest priority)
     2. Text regex fallback using pre-compiled ``extraction_patterns``
     """
-    # Extract name (required)
+    # Extract name (required) — try data attribute first, then CSS selector
     name = ""
-    if strategy.name_selector:
+    if strategy.name_attr:
+        try:
+            name = (await container.get_attribute(strategy.name_attr) or "").strip()
+        except Exception:
+            pass
+    if not name and strategy.name_selector:
         try:
             name_el = await container.query_selector(strategy.name_selector)
             if name_el:
@@ -740,10 +1015,20 @@ async def _extract_single_product(
     if len(name) < 8 or name in get_garbage_names():
         return None
 
-    # Extract price
+    # Extract price — try data attribute first, then CSS selector, then regex
     price: float | None = None
     currency = strategy.currency_hint or "USD"
-    if strategy.price_selector:
+    if strategy.price_attr:
+        try:
+            price_raw = (await container.get_attribute(strategy.price_attr) or "").strip()
+            if price_raw:
+                price = parse_price(price_raw)
+                # Data attributes are pure numbers; use domain default currency
+                if price is not None:
+                    currency = get_default_currency_for_domain(domain)
+        except Exception:
+            pass
+    if price is None and strategy.price_selector:
         try:
             price_el = await container.query_selector(strategy.price_selector)
             if price_el:
@@ -1011,6 +1296,76 @@ def _extract_price_from_text(text: str, default_currency: str = "USD") -> tuple[
                 return price, cur
 
     return None, default_currency
+
+
+def _merge_comparison_sellers(
+    products: list[ProductResult],
+    product_query: str,
+    domain: str,
+) -> list[ProductResult]:
+    """Merge multiple single-seller products into one multi-seller product.
+
+    On price-comparison pages each extracted "product" is really one seller
+    row for the same product.  Detect this pattern and merge:
+
+    - All products share the same name (or are seller names from data attrs)
+    - All have exactly one seller each
+    - The query matches none of the names (names are seller names, not product)
+
+    Returns the original list unchanged if the pattern is not detected.
+    """
+    if len(products) < 2:
+        return products
+
+    # All must have exactly one seller with a price
+    if not all(len(p.sellers) == 1 and p.sellers[0].price is not None for p in products):
+        return products
+
+    # Check if names look like seller/store names rather than product names.
+    # Heuristic: the product query doesn't appear in any of the extracted
+    # names, meaning the "name" field holds a seller name, not a product name.
+    query_lower = product_query.lower()
+    has_query_match = any(
+        query_lower in p.name.lower() or
+        (p.model_id and query_lower in p.model_id.lower())
+        for p in products
+    )
+    if has_query_match:
+        return products
+
+    # Check for name uniformity: either all same name, or all unique
+    # (unique = seller names like "Store A", "Store B")
+    names = [p.name for p in products]
+    unique_names = set(names)
+    all_same = len(unique_names) == 1
+    all_unique = len(unique_names) == len(names)
+
+    if not (all_same or all_unique):
+        return products
+
+    # Merge: combine all sellers into one ProductResult
+    sellers: list[Seller] = []
+    for p in products:
+        seller = p.sellers[0]
+        # If all names are the same, the name is likely a generic label;
+        # if all unique, each name is a seller name.
+        if all_unique:
+            seller.name = p.name
+        sellers.append(seller)
+
+    merged = ProductResult(
+        name=product_query,
+        model_id=product_query,
+        brand=products[0].brand,
+        image_url=products[0].image_url,
+        sellers=sellers,
+    )
+
+    logger.info(
+        "Merged %d comparison rows into 1 product with %d sellers for %s",
+        len(products), len(sellers), domain,
+    )
+    return [merged]
 
 
 def _detect_currency_from_text(text: str) -> str:

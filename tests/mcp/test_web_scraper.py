@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.mcp_servers.web_scraper_mcp.scraper import (
+    _extract_from_data_attrs,
+    _extract_jsonld_from_soup,
+    _extract_page_product_name,
     _find_next_page_url,
+    _is_safe_url,
+    _merge_comparison_sellers,
+    _try_http_prefetch,
     extract_domain,
     extract_specs_from_text,
     parse_price,
     scrape_page,
 )
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
+from src.shared.models import ProductResult, Seller
 
 
 class TestParsePrice:
@@ -121,7 +128,7 @@ class TestScrapePageWithCachedStrategy:
         assert results[0].name == "Test Laptop"
         assert results[0].sellers[0].price == 999.99
         assert results[0].sellers[0].currency == "USD"
-        mock_update.assert_awaited_once_with("shop.example.com", success=True)
+        mock_update.assert_awaited_once_with("shop.example.com", success=True, page_type="search")
 
 
 class TestScrapePageCachedStrategyFailure:
@@ -183,7 +190,7 @@ class TestScrapePageCachedStrategyFailure:
         assert len(results) == 1
         assert results[0].name == "New Product"
         # Cached strategy failure should decrement success rate
-        mock_update.assert_awaited_with("shop.example.com", success=False)
+        mock_update.assert_awaited_with("shop.example.com", success=False, page_type="page")
         # New strategy should be saved
         mock_save.assert_awaited_once()
 
@@ -401,3 +408,479 @@ class TestScrapePagePagination:
         assert len(results) == 2
         assert results[0].name == "Product A"
         assert results[1].name == "Product B"
+
+
+# ---------------------------------------------------------------------------
+# Data-attribute extraction
+# ---------------------------------------------------------------------------
+
+
+class TestDataAttributeExtraction:
+    @pytest.mark.asyncio
+    async def test_extracts_from_data_attrs_and_merges_sellers(self):
+        """When strategy has name_attr/price_attr, read from container attributes.
+
+        Two seller rows with different names/prices should merge into
+        one product with multiple sellers (comparison-page pattern).
+        """
+        strategy = ScrapingStrategy(
+            product_container="[data-site-name]",
+            name_attr="data-site-name",
+            price_attr="data-product-price",
+        )
+
+        def make_seller_container(store_name, price):
+            container = AsyncMock()
+
+            async def get_attr(attr):
+                if attr == "data-site-name":
+                    return store_name
+                if attr == "data-product-price":
+                    return str(price)
+                return None
+
+            container.get_attribute = get_attr
+            container.query_selector = AsyncMock(return_value=None)
+            container.inner_text = AsyncMock(return_value=f"{store_name} ₪{price}")
+            return container
+
+        c1 = make_seller_container("Store Alpha", 1299)
+        c2 = make_seller_container("Store Beta", 1199)
+
+        mock_page = AsyncMock()
+        mock_page.query_selector_all.return_value = [c1, c2]
+
+        mock_browser = AsyncMock()
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
+        ):
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_get_page.return_value = mock_ctx
+
+            results = await scrape_page(
+                mock_browser,
+                "https://shop.example.co.il/product/123",
+                product_query="BFL523MB1F",
+            )
+
+        # Should merge into one product with two sellers
+        assert len(results) == 1
+        assert results[0].name == "BFL523MB1F"
+        assert len(results[0].sellers) == 2
+        assert results[0].sellers[0].name == "Store Alpha"
+        assert results[0].sellers[0].price == 1299.0
+        assert results[0].sellers[1].name == "Store Beta"
+        assert results[0].sellers[1].price == 1199.0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_css_when_no_data_attr(self):
+        """When data attr is empty, fall back to CSS sub-selector."""
+        strategy = ScrapingStrategy(
+            product_container=".product-card",
+            name_selector="h2",
+            price_selector=".price",
+            name_attr="data-site-name",  # Set but won't match
+        )
+
+        mock_container = AsyncMock()
+
+        async def mock_get_attribute(attr):
+            return None  # No data attributes present
+
+        mock_name_el = AsyncMock()
+        mock_name_el.inner_text.return_value = "Test Product Name Here"
+
+        mock_price_el = AsyncMock()
+        mock_price_el.inner_text.return_value = "$599"
+
+        async def mock_query_selector(selector):
+            if selector == "h2":
+                return mock_name_el
+            if selector == ".price":
+                return mock_price_el
+            return None
+
+        mock_container.get_attribute = mock_get_attribute
+        mock_container.query_selector = mock_query_selector
+        mock_container.inner_text = AsyncMock(return_value="Test Product Name Here $599")
+
+        mock_page = AsyncMock()
+        mock_page.query_selector_all.return_value = [mock_container]
+
+        mock_browser = AsyncMock()
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
+        ):
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_get_page.return_value = mock_ctx
+
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert len(results) == 1
+        assert results[0].name == "Test Product Name Here"
+        assert results[0].sellers[0].price == 599.0
+
+
+# ---------------------------------------------------------------------------
+# Comparison-page merge
+# ---------------------------------------------------------------------------
+
+
+class TestMergeComparisonSellers:
+    def test_merges_seller_rows_unique_names(self):
+        """Rows with unique names (seller names) are merged into one product."""
+        products = [
+            ProductResult(
+                name="Store A",
+                model_id="hash_a",
+                sellers=[Seller(name="example.com", price=1000, currency="ILS", url="https://example.com")],
+            ),
+            ProductResult(
+                name="Store B",
+                model_id="hash_b",
+                sellers=[Seller(name="example.com", price=1100, currency="ILS", url="https://example.com")],
+            ),
+            ProductResult(
+                name="Store C",
+                model_id="hash_c",
+                sellers=[Seller(name="example.com", price=950, currency="ILS", url="https://example.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "BFL523MB1F", "example.com")
+
+        assert len(result) == 1
+        assert result[0].name == "BFL523MB1F"
+        assert len(result[0].sellers) == 3
+        assert result[0].sellers[0].name == "Store A"
+        assert result[0].sellers[1].name == "Store B"
+        assert result[0].sellers[2].name == "Store C"
+
+    def test_merges_seller_rows_same_name(self):
+        """Rows with identical names (generic label) are merged."""
+        products = [
+            ProductResult(
+                name="Product Page",
+                model_id="h1",
+                sellers=[Seller(name="store.com", price=500, currency="USD", url="https://store.com")],
+            ),
+            ProductResult(
+                name="Product Page",
+                model_id="h2",
+                sellers=[Seller(name="store.com", price=520, currency="USD", url="https://store.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "XYZ123", "store.com")
+
+        assert len(result) == 1
+        assert len(result[0].sellers) == 2
+
+    def test_no_merge_when_query_in_name(self):
+        """Products whose name contains the query are real products, not seller rows."""
+        products = [
+            ProductResult(
+                name="BFL523MB1F Microwave",
+                model_id="m1",
+                sellers=[Seller(name="store.com", price=500, currency="USD", url="https://store.com")],
+            ),
+            ProductResult(
+                name="BFL523MB2F Microwave XL",
+                model_id="m2",
+                sellers=[Seller(name="store.com", price=600, currency="USD", url="https://store.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "BFL523MB1F", "store.com")
+
+        # Should NOT merge — these are different products
+        assert len(result) == 2
+
+    def test_no_merge_single_product(self):
+        """Single product should not be changed."""
+        products = [
+            ProductResult(
+                name="Store A",
+                model_id="h1",
+                sellers=[Seller(name="store.com", price=100, currency="USD", url="https://store.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "ABC123", "store.com")
+        assert len(result) == 1
+        assert result[0].name == "Store A"  # Unchanged
+
+    def test_no_merge_when_no_prices(self):
+        """Products without prices should not be merged."""
+        products = [
+            ProductResult(
+                name="Store A",
+                model_id="h1",
+                sellers=[Seller(name="store.com", price=None, currency="USD", url="https://store.com")],
+            ),
+            ProductResult(
+                name="Store B",
+                model_id="h2",
+                sellers=[Seller(name="store.com", price=None, currency="USD", url="https://store.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "ABC123", "store.com")
+        assert len(result) == 2
+
+    def test_no_merge_mixed_names(self):
+        """Products with some duplicate and some unique names: ambiguous, skip."""
+        products = [
+            ProductResult(
+                name="Store A",
+                model_id="h1",
+                sellers=[Seller(name="s.com", price=100, currency="USD", url="https://s.com")],
+            ),
+            ProductResult(
+                name="Store A",
+                model_id="h2",
+                sellers=[Seller(name="s.com", price=200, currency="USD", url="https://s.com")],
+            ),
+            ProductResult(
+                name="Store B",
+                model_id="h3",
+                sellers=[Seller(name="s.com", price=300, currency="USD", url="https://s.com")],
+            ),
+        ]
+
+        result = _merge_comparison_sellers(products, "ABC123", "s.com")
+        # Mixed names (not all same, not all unique) -> no merge
+        assert len(result) == 3
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection
+# ---------------------------------------------------------------------------
+
+class TestIsSafeUrl:
+    def test_rejects_localhost(self):
+        assert _is_safe_url("http://localhost/secret") is False
+
+    def test_rejects_127(self):
+        assert _is_safe_url("http://127.0.0.1/admin") is False
+
+    def test_rejects_private_10(self):
+        assert _is_safe_url("http://10.0.0.1/internal") is False
+
+    def test_rejects_private_192(self):
+        assert _is_safe_url("http://192.168.1.1/") is False
+
+    def test_rejects_metadata_169(self):
+        assert _is_safe_url("http://169.254.169.254/latest/meta-data/") is False
+
+    def test_accepts_public_url(self):
+        assert _is_safe_url("https://www.example.com/products") is True
+
+    def test_rejects_no_scheme(self):
+        assert _is_safe_url("ftp://example.com") is False
+
+    def test_rejects_empty(self):
+        assert _is_safe_url("") is False
+
+
+# ---------------------------------------------------------------------------
+# HTTP pre-fetch
+# ---------------------------------------------------------------------------
+
+class TestHttpPrefetch:
+    @pytest.mark.asyncio
+    async def test_returns_none_for_unsafe_url(self):
+        result = await _try_http_prefetch(
+            "http://127.0.0.1/admin", "test", "127.0.0.1",
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_http_error(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                   return_value=mock_client):
+            result = await _try_http_prefetch(
+                "https://example.com/product", "test", "example.com",
+            )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_small_html(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "<html><body>tiny</body></html>"
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                   return_value=mock_client):
+            result = await _try_http_prefetch(
+                "https://example.com/product", "test", "example.com",
+            )
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_network_error(self):
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = Exception("Connection refused")
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                   return_value=mock_client):
+            result = await _try_http_prefetch(
+                "https://example.com/product", "test", "example.com",
+            )
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# BeautifulSoup extraction helpers
+# ---------------------------------------------------------------------------
+
+class TestExtractPageProductName:
+    def test_extracts_from_h1(self):
+        from bs4 import BeautifulSoup
+        html = "<html><body><h1>Bosch SMV4ECX28E Dishwasher</h1></body></html>"
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_page_product_name(soup) == "Bosch SMV4ECX28E Dishwasher"
+
+    def test_extracts_from_og_title(self):
+        from bs4 import BeautifulSoup
+        html = '<html><head><meta property="og:title" content="Samsung Fridge"/></head></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_page_product_name(soup) == "Samsung Fridge"
+
+    def test_extracts_from_title_tag(self):
+        from bs4 import BeautifulSoup
+        html = "<html><head><title>Product X - Shop</title></head></html>"
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_page_product_name(soup) == "Product X"
+
+    def test_returns_empty_when_no_title(self):
+        from bs4 import BeautifulSoup
+        html = "<html><body><div>no heading</div></body></html>"
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_page_product_name(soup) == ""
+
+
+class TestExtractFromDataAttrs:
+    def test_extracts_sellers_from_comparison_page(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head><title>Bosch BFL523MB1F</title></head><body>
+        <h1>Bosch BFL523MB1F Microwave</h1>
+        <div data-product-price="1988" data-site-name="Store A">
+            <a href="https://store-a.com/buy">Buy</a>
+        </div>
+        <div data-product-price="1940" data-site-name="Store B">
+            <a href="https://store-b.com/buy">Buy</a>
+        </div>
+        <div data-product-price="1941" data-site-name="Store C">
+            <a href="/store-c">Buy</a>
+        </div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+                   return_value="ILS"):
+            products = _extract_from_data_attrs(
+                soup, "https://compare.example.com/product/123", "compare.example.com",
+                "Bosch BFL523MB1F Microwave",
+            )
+        assert len(products) == 1
+        p = products[0]
+        assert p.name == "Bosch BFL523MB1F Microwave"
+        assert p.model_id == "BFL523MB1F"
+        assert len(p.sellers) == 3
+        assert p.sellers[0].price == 1988
+        assert p.sellers[0].name == "Store A"
+        assert p.sellers[1].price == 1940
+
+    def test_returns_empty_for_single_row(self):
+        from bs4 import BeautifulSoup
+        html = '<html><body><div data-product-price="100">one</div></body></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_from_data_attrs(soup, "https://x.com", "x.com", "Prod") == []
+
+    def test_skips_invalid_prices(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><body>
+        <div data-product-price="abc" data-site-name="A"></div>
+        <div data-product-price="0" data-site-name="B"></div>
+        <div data-product-price="500" data-site-name="C"></div>
+        <div data-product-price="600" data-site-name="D"></div>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+                   return_value="USD"):
+            products = _extract_from_data_attrs(soup, "https://x.com", "x.com", "Widget")
+        # Only 500 and 600 are valid
+        assert len(products) == 1
+        assert len(products[0].sellers) == 2
+
+
+class TestExtractJsonldFromSoup:
+    def test_extracts_product_from_jsonld(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <script type="application/ld+json">
+        {
+            "@type": "Product",
+            "name": "Samsung Galaxy S24",
+            "mpn": "SM-S921B",
+            "brand": {"@type": "Brand", "name": "Samsung"},
+            "image": "https://img.example.com/s24.jpg",
+            "offers": {"price": "3499", "priceCurrency": "ILS"}
+        }
+        </script>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = _extract_jsonld_from_soup(soup, "https://shop.example.com/s24", "shop.example.com")
+        assert result is not None
+        assert result.name == "Samsung Galaxy S24"
+        assert result.model_id == "SM-S921B"
+        assert result.brand == "Samsung"
+        assert result.sellers[0].price == 3499
+        assert result.sellers[0].currency == "ILS"
+
+    def test_returns_none_when_no_jsonld(self):
+        from bs4 import BeautifulSoup
+        html = "<html><body>No JSON-LD</body></html>"
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_jsonld_from_soup(soup, "https://x.com", "x.com") is None
+
+    def test_skips_non_product_jsonld(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <script type="application/ld+json">
+        {"@type": "Organization", "name": "Acme Corp"}
+        </script>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_jsonld_from_soup(soup, "https://x.com", "x.com") is None

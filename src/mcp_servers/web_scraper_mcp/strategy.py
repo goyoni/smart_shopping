@@ -27,8 +27,30 @@ _CONTAINER_CANDIDATES: list[str] = [
     "div[class*='product']",
     "article[class*='product']",
     "div[class*='Product']",
-    "div[class*='item']",
-    "div[class*='Item']",
+    # Common e-commerce listing patterns
+    "[class*='result-item']",
+    "[class*='ResultItem']",
+    "[class*='catalog-item']",
+    "[class*='CatalogItem']",
+    "[class*='grid-item']",
+    "[class*='GridItem']",
+    "[class*='listing-item']",
+    "[class*='card'][class*='product']",
+    # Generic — last resort, can match non-product items
+    "div[class*='item'][class*='product']",
+    # Price-comparison / seller-listing patterns
+    "[class*='compare-item']",
+    "[class*='compare'][class*='row']",
+    "[class*='bid-row']",
+    "[class*='bid'][class*='item']",
+    "[class*='offer-row']",
+    "[class*='offer'][class*='item']",
+    "[class*='seller-row']",
+    "[class*='seller'][class*='item']",
+    "[class*='store-row']",
+    "[class*='store'][class*='item']",
+    "[data-product-price]",
+    "[data-site-name]",
 ]
 
 _NAME_CANDIDATES: list[str] = [
@@ -40,6 +62,11 @@ _NAME_CANDIDATES: list[str] = [
     "a[class*='product']",
     "a[class*='Product']",
     "a[class*='Model']",
+    # Seller/store name patterns (price-comparison sites)
+    "[class*='store-name']", "[class*='StoreName']",
+    "[class*='seller-name']", "[class*='SellerName']",
+    "[class*='shop-name']", "[class*='ShopName']",
+    "[class*='merchant']", "[class*='Merchant']",
 ]
 
 _PRICE_CANDIDATES: list[str] = [
@@ -80,6 +107,12 @@ class ScrapingStrategy:
     version: int = 1
     discovery_method: str = "css_candidates"
     criteria_selectors: dict[str, str] = field(default_factory=dict)
+    # Data-attribute extraction: when set, read these attributes from the
+    # container element itself instead of using sub-selector + inner_text.
+    # E.g. name_attr="data-site-name" reads the seller name from the
+    # container's data-site-name attribute.
+    name_attr: str = ""
+    price_attr: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -189,6 +222,34 @@ async def _find_selector(container, candidates: list[str]) -> str:
     return ""
 
 
+# Data attributes commonly used by price-comparison and e-commerce sites
+# to store product/seller data directly on DOM elements.
+_DATA_ATTR_NAME_CANDIDATES: list[str] = [
+    "data-site-name", "data-store-name", "data-seller-name",
+    "data-shop-name", "data-merchant-name", "data-vendor-name",
+]
+
+_DATA_ATTR_PRICE_CANDIDATES: list[str] = [
+    "data-product-price", "data-price", "data-min-price",
+    "data-sale-price", "data-final-price", "data-amount",
+]
+
+
+async def _find_data_attr(container, candidates: list[str]) -> str:
+    """Check if a container element has any of the given data attributes.
+
+    Returns the attribute name (e.g. 'data-product-price') or empty string.
+    """
+    for attr in candidates:
+        try:
+            value = await container.get_attribute(attr)
+            if value and value.strip():
+                return attr
+        except Exception:
+            continue
+    return ""
+
+
 async def discover_strategy(
     page: Page,
     product_query: str = "",
@@ -220,6 +281,8 @@ async def discover_strategy(
         price_sel = ""
         image_sel = ""
         url_sel = ""
+        name_data_attr = ""
+        price_data_attr = ""
         for probe in containers[:3]:
             if not name_sel:
                 name_sel = await _find_selector(probe, _NAME_CANDIDATES)
@@ -229,9 +292,14 @@ async def discover_strategy(
                 image_sel = await _find_selector(probe, _IMAGE_CANDIDATES)
             if not url_sel:
                 url_sel = await _find_selector(probe, _URL_CANDIDATES)
+            # Also probe for data attributes on the container element itself
+            if not name_data_attr:
+                name_data_attr = await _find_data_attr(probe, _DATA_ATTR_NAME_CANDIDATES)
+            if not price_data_attr:
+                price_data_attr = await _find_data_attr(probe, _DATA_ATTR_PRICE_CANDIDATES)
 
-        # Must find at least name selector
-        if not name_sel:
+        # Must find at least name selector OR name data attribute
+        if not name_sel and not name_data_attr:
             continue
 
         # Use the first container that has a name for currency/criteria probing
@@ -268,15 +336,171 @@ async def discover_strategy(
             currency_hint=currency_hint,
             discovery_method="css_candidates",
             criteria_selectors=criteria_sels,
+            name_attr=name_data_attr,
+            price_attr=price_data_attr,
         )
 
-    # Fallback: price-pattern based discovery
+    # Fallback 1: single-product page discovery (product detail pages)
+    strategy = await _discover_single_product(page, criteria)
+    if strategy:
+        return strategy
+
+    # Fallback 2: price-pattern based discovery
     strategy = await _discover_by_price_pattern(page)
     if strategy:
         return strategy
 
     logger.warning("Could not discover scraping strategy for page")
     return None
+
+
+_SINGLE_PRODUCT_NAME_CANDIDATES: list[str] = [
+    "h1[class*='product']", "h1[class*='Product']",
+    "h1[class*='title']", "h1[class*='Title']",
+    "h1[class*='name']", "h1[class*='Name']",
+    "[class*='product-title']", "[class*='product-name']",
+    "[class*='productTitle']", "[class*='productName']",
+    "[class*='ProductTitle']", "[class*='ProductName']",
+    "[data-product-name]",
+    "h1",
+]
+
+_SINGLE_PRODUCT_PRICE_CANDIDATES: list[str] = [
+    "[class*='product-price']", "[class*='productPrice']",
+    "[class*='ProductPrice']", "[class*='product_price']",
+    "[class*='price'][class*='current']",
+    "[class*='sale-price']", "[class*='salePrice']",
+    "[data-price]", "[data-product-price]",
+    "[class*='price']", "[class*='Price']",
+    "span[class*='amount']",
+    "[class*='cost']", "[class*='Cost']",
+]
+
+# Selectors for the main product content area — used as container for
+# single-product pages so the cached strategy can be reused across pages.
+_SINGLE_PRODUCT_CONTAINER_CANDIDATES: list[str] = [
+    "[class*='product-detail']", "[class*='productDetail']",
+    "[class*='ProductDetail']", "[class*='product-info']",
+    "[class*='productInfo']", "[class*='ProductInfo']",
+    "[class*='product-page']", "[class*='productPage']",
+    "[class*='product-summary']",
+    "[class*='pdp-']",
+    "[itemtype*='schema.org/Product']",
+    "main", "article",
+]
+
+
+async def _discover_single_product(
+    page: Page,
+    criteria: dict[str, dict] | None = None,
+) -> ScrapingStrategy | None:
+    """Discover strategy for a single-product detail page.
+
+    Unlike the listing-page approach, this does not require ≥2 containers.
+    It looks for a product name (typically h1) and price on the page.
+    The discovered strategy is cached per domain and reused for other
+    product pages on the same site.
+    """
+    # Find a product name element, skipping elements inside nav/header/footer
+    name_sel = ""
+    for selector in _SINGLE_PRODUCT_NAME_CANDIDATES:
+        try:
+            els = await page.query_selector_all(selector)
+            for el in els:
+                # Reject elements inside nav, header, footer, or sidebar
+                in_excluded = await page.evaluate(
+                    """(el) => {
+                        let node = el;
+                        while (node) {
+                            const tag = node.tagName?.toLowerCase() || '';
+                            const cls = (node.className || '').toLowerCase();
+                            if (['nav', 'header', 'footer'].includes(tag)) return true;
+                            if (cls.includes('nav') || cls.includes('menu') ||
+                                cls.includes('sidebar') || cls.includes('breadcrumb') ||
+                                cls.includes('header') || cls.includes('footer')) return true;
+                            node = node.parentElement;
+                        }
+                        return false;
+                    }""",
+                    el,
+                )
+                if in_excluded:
+                    continue
+                text = (await el.inner_text()).strip()
+                # Must be reasonable product name (not too short, not too long)
+                if text and 3 <= len(text) <= 300:
+                    name_sel = selector
+                    break
+            if name_sel:
+                break
+        except Exception:
+            continue
+
+    if not name_sel:
+        return None
+
+    # Find a price element
+    price_sel = ""
+    currency_hint = ""
+    for selector in _SINGLE_PRODUCT_PRICE_CANDIDATES:
+        try:
+            el = await page.query_selector(selector)
+            if el:
+                text = (await el.inner_text()).strip()
+                if _looks_like_price(text):
+                    price_sel = selector
+                    currency_hint = _detect_currency(text)
+                    break
+        except Exception:
+            continue
+
+    # Must find at least a price to be useful for price comparison
+    if not price_sel:
+        return None
+
+    # Find a container that wraps both name and price
+    container_sel = ""
+    for selector in _SINGLE_PRODUCT_CONTAINER_CANDIDATES:
+        try:
+            container = await page.query_selector(selector)
+            if container:
+                # Verify the container contains both name and price
+                has_name = await container.query_selector(name_sel)
+                has_price = await container.query_selector(price_sel)
+                if has_name and has_price:
+                    container_sel = selector
+                    break
+        except Exception:
+            continue
+
+    if not container_sel:
+        # Use body as container — less ideal but functional
+        container_sel = "body"
+
+    # Find image and URL selectors within the container scope
+    probe = await page.query_selector(container_sel)
+    image_sel = ""
+    if probe:
+        image_sel = await _find_selector(probe, _IMAGE_CANDIDATES)
+        criteria_sels = await _discover_criteria_selectors(probe, criteria)
+    else:
+        criteria_sels = {}
+
+    logger.info(
+        "Discovered single-product strategy: container='%s' name='%s' price='%s'",
+        container_sel, name_sel, price_sel,
+    )
+
+    return ScrapingStrategy(
+        product_container=container_sel,
+        name_selector=name_sel,
+        price_selector=price_sel,
+        image_selector=image_sel,
+        currency_hint=currency_hint,
+        discovery_method="single_product",
+        criteria_selectors=criteria_sels,
+    )
+
 
 
 async def _discover_by_price_pattern(page: Page) -> ScrapingStrategy | None:

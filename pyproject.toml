@@ -25,6 +25,8 @@ dependencies = [
     "mcp>=1.0.0",
     "geoip2>=4.8.0",
     "litellm>=1.30.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
 ]
 
 [project.optional-dependencies]
