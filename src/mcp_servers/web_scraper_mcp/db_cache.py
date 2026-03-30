@@ -17,6 +17,10 @@ logger = get_logger(__name__)
 _CACHE_TTL_DAYS = 30
 _MIN_SUCCESS_RATE = 0.5
 _EMA_ALPHA = 0.3
+_CAPTCHA_BLOCK_HOURS = 24
+_WAF_BLOCK_HOURS = 1
+_MAX_CONSECUTIVE_FAILURES = 5
+_VALIDATION_FAILURE_THRESHOLD = 3
 
 
 async def get_cached_strategy(
@@ -115,3 +119,131 @@ async def update_success_rate(
         record.updated_at = datetime.now(timezone.utc)
         await session.commit()
         logger.info("Updated success rate for %s/%s: %.2f", domain, page_type, record.success_rate)
+
+
+async def update_failure(
+    domain: str,
+    failure_type: str,
+    page_type: str = "default",
+) -> None:
+    """Record a pipeline failure with block detection.
+
+    When consecutive failures exceed the threshold and the failure is a
+    CAPTCHA or WAF block, the domain is marked as blocked.
+    """
+    async with async_session() as session:
+        stmt = select(ScrapingInstruction).where(
+            and_(
+                ScrapingInstruction.domain == domain,
+                ScrapingInstruction.page_type == page_type,
+            )
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        if not record:
+            return
+
+        strategy = ScrapingStrategy.from_json(record.strategy_json)
+        strategy.consecutive_failures += 1
+        strategy.last_failure_type = failure_type
+
+        # Detect blocks based on failure type
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if failure_type == "cloudflare_captcha":
+            strategy.block_type = "captcha"
+            strategy.blocked_at = now_iso
+            logger.warning("Domain %s marked as CAPTCHA-blocked", domain)
+        elif failure_type in ("waf_blocked", "http_blocked") and strategy.consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+            strategy.block_type = "waf"
+            strategy.blocked_at = now_iso
+            logger.warning("Domain %s marked as WAF-blocked after %d failures", domain, strategy.consecutive_failures)
+
+        record.strategy_json = strategy.to_json()
+        record.success_rate = _EMA_ALPHA * 0.0 + (1 - _EMA_ALPHA) * record.success_rate
+        record.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+
+
+async def is_domain_blocked(
+    domain: str, page_type: str = "default",
+) -> bool:
+    """Check if a domain is currently blocked.
+
+    CAPTCHA blocks last 24 hours. WAF blocks last 1 hour.
+    """
+    async with async_session() as session:
+        stmt = select(ScrapingInstruction).where(
+            and_(
+                ScrapingInstruction.domain == domain,
+                ScrapingInstruction.page_type == page_type,
+            )
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        if not record:
+            return False
+
+        strategy = ScrapingStrategy.from_json(record.strategy_json)
+        if not strategy.block_type or not strategy.blocked_at:
+            return False
+
+        try:
+            blocked_at = datetime.fromisoformat(strategy.blocked_at)
+            if blocked_at.tzinfo is None:
+                blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return False
+
+        now = datetime.now(timezone.utc)
+        if strategy.block_type == "captcha":
+            if now - blocked_at < timedelta(hours=_CAPTCHA_BLOCK_HOURS):
+                return True
+        elif strategy.block_type == "waf":
+            if now - blocked_at < timedelta(hours=_WAF_BLOCK_HOURS):
+                return True
+
+        # Block expired — clear it
+        strategy.block_type = ""
+        strategy.blocked_at = ""
+        strategy.consecutive_failures = 0
+        record.strategy_json = strategy.to_json()
+        record.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+        logger.info("Block expired for %s/%s, cleared", domain, page_type)
+        return False
+
+
+async def mark_validation_failure(
+    domain: str, page_type: str = "default",
+) -> bool:
+    """Increment validation failure counter. Returns True if threshold exceeded."""
+    async with async_session() as session:
+        stmt = select(ScrapingInstruction).where(
+            and_(
+                ScrapingInstruction.domain == domain,
+                ScrapingInstruction.page_type == page_type,
+            )
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        if not record:
+            return False
+
+        strategy = ScrapingStrategy.from_json(record.strategy_json)
+        strategy.validation_failures += 1
+        exceeded = strategy.validation_failures >= _VALIDATION_FAILURE_THRESHOLD
+
+        if exceeded:
+            logger.warning(
+                "Validation failures for %s/%s reached %d, strategy marked stale",
+                domain, page_type, strategy.validation_failures,
+            )
+            record.success_rate = 0.0  # Force re-discovery next time
+
+        record.strategy_json = strategy.to_json()
+        record.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+        return exceeded

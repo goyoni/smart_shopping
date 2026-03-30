@@ -18,7 +18,10 @@ from playwright.async_api import Browser, Response
 
 from src.mcp_servers.web_scraper_mcp.db_cache import (
     get_cached_strategy,
+    is_domain_blocked,
+    mark_validation_failure,
     save_strategy,
+    update_failure,
     update_success_rate,
 )
 from src.mcp_servers.web_scraper_mcp.diagnostics import (
@@ -207,6 +210,11 @@ async def scrape_page(
     if not _is_safe_url(url):
         return []
 
+    # Check if domain is currently blocked (CAPTCHA/WAF with active TTL)
+    if await is_domain_blocked(domain, page_type):
+        logger.info("Skipping blocked domain %s/%s", domain, page_type)
+        return []
+
     # Load cached strategy
     cached = await get_cached_strategy(domain, page_type)
     pipeline = _build_pipeline(cached)
@@ -228,10 +236,11 @@ async def scrape_page(
         if result.success:
             validated = validate_results(result.products, product_query, domain)
             if validated:
-                await _cache_success(domain, page_type, result)
+                await _cache_success(domain, page_type, result, url)
                 return _post_process(validated, product_query, domain)
             else:
                 last_failure = FailureType.LOW_QUALITY
+                await mark_validation_failure(domain, page_type)
                 logger.info(
                     "Results from %s/%s failed validation, trying next method",
                     access_method, result.extraction_method,
@@ -253,7 +262,9 @@ async def scrape_page(
         if last_failure == FailureType.NAVIGATION_FAILED and access_method == "playwright":
             break  # If even the browser can't connect, nothing will
 
+    # Record the failure for domain tracking
     if last_failure:
+        await update_failure(domain, last_failure.value, page_type)
         logger.warning(
             "All access methods failed for %s (last: %s)",
             domain, last_failure.value,
@@ -555,6 +566,7 @@ async def _cache_success(
     domain: str,
     page_type: str,
     result: ExtractionResult,
+    url: str = "",
 ) -> None:
     """Cache the winning access+extraction method for future use."""
     # For HTTP-based extractions, save a lightweight strategy marker
@@ -564,6 +576,12 @@ async def _cache_success(
             discovery_method=result.extraction_method,
             access_method=result.access_method,
             extraction_method=result.extraction_method,
+            last_successful_url=url,
+            # Reset failure counters on success
+            consecutive_failures=0,
+            validation_failures=0,
+            block_type="",
+            blocked_at="",
         )
         await save_strategy(domain, strategy, page_type)
         logger.info(

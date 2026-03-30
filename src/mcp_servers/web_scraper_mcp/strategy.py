@@ -108,6 +108,13 @@ class ScrapingStrategy:
     discovery_method: str = "css_candidates"
     access_method: str = ""
     extraction_method: str = ""
+    # Failure tracking
+    block_type: str = ""          # "captcha", "waf", "" (not blocked)
+    blocked_at: str = ""          # ISO timestamp when block was detected
+    last_failure_type: str = ""   # FailureType.value from last failure
+    consecutive_failures: int = 0
+    validation_failures: int = 0  # Consecutive validation-quality failures
+    last_successful_url: str = "" # Probe URL for health checks
     criteria_selectors: dict[str, str] = field(default_factory=dict)
     # Data-attribute extraction: when set, read these attributes from the
     # container element itself instead of using sub-selector + inner_text.

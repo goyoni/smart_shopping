@@ -21,6 +21,7 @@ from src.mcp_servers.web_scraper_mcp.extractors import (
     _extract_microdata_from_soup,
     _extract_og_product_from_soup,
     _extract_page_product_name,
+    validate_results,
 )
 from src.mcp_servers.web_scraper_mcp.diagnostics import (
     ExtractionResult,
@@ -917,3 +918,158 @@ class TestScrapePagePipeline:
 
         assert len(results) == 1
         assert results[0].name == "Real Product"
+
+    @pytest.mark.asyncio
+    async def test_skips_blocked_domain(self):
+        """Blocked domains are skipped immediately."""
+        mock_browser = AsyncMock()
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=True),
+        ):
+            results = await scrape_page(mock_browser, "https://blocked.example.com/search?q=test")
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_records_failure_on_pipeline_exhaustion(self):
+        """When all methods fail, update_failure is called."""
+        mock_browser = AsyncMock()
+        fail_result = ExtractionResult(
+            access_method="playwright",
+            failure_type=FailureType.NO_PRODUCTS_FOUND,
+            failure_detail="no products",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=False),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  return_value=ExtractionResult(
+                      access_method="httpx",
+                      failure_type=FailureType.HTTP_BLOCKED,
+                      failure_detail="403",
+                      domain="shop.example.com",
+                      page_type="search",
+                  )),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+                  return_value=fail_result),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.update_failure") as mock_update_failure,
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=test")
+
+        assert results == []
+        mock_update_failure.assert_awaited_once_with(
+            "shop.example.com", "no_products", "search",
+        )
+
+    @pytest.mark.asyncio
+    async def test_marks_validation_failure(self):
+        """When extraction succeeds but validation fails, mark_validation_failure is called."""
+        mock_browser = AsyncMock()
+        bad_product = ProductResult(
+            name="X", model_id="", sellers=[],
+        )
+        http_result = ExtractionResult(
+            products=[bad_product],
+            access_method="httpx",
+            extraction_method="jsonld",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        # All methods return products that fail validation
+        fail_http2 = ExtractionResult(
+            access_method="curl_cffi",
+            failure_type=FailureType.HTTP_BLOCKED,
+            failure_detail="403",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        fail_pw = ExtractionResult(
+            access_method="playwright",
+            failure_type=FailureType.NO_PRODUCTS_FOUND,
+            failure_detail="nothing",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=False),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  side_effect=[http_result, fail_http2]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+                  return_value=fail_pw),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results", return_value=[]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.mark_validation_failure") as mock_val,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.update_failure"),
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=test")
+
+        assert results == []
+        mock_val.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Enhanced validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateResults:
+    def test_rejects_short_names(self):
+        products = [
+            ProductResult(name="AB", model_id="", sellers=[
+                Seller(name="s.com", price=100, currency="USD", url="https://s.com"),
+            ]),
+        ]
+        assert validate_results(products, "", "s.com") == []
+
+    def test_rejects_negative_prices(self):
+        products = [
+            ProductResult(name="Good Product", model_id="GP1", sellers=[
+                Seller(name="s.com", price=-50, currency="USD", url="https://s.com"),
+            ]),
+        ]
+        assert validate_results(products, "", "s.com") == []
+
+    def test_keeps_valid_products(self):
+        products = [
+            ProductResult(name="Samsung Galaxy S24", model_id="SM-S921B", sellers=[
+                Seller(name="shop.com", price=3499, currency="ILS", url="https://shop.com"),
+            ]),
+        ]
+        result = validate_results(products, "Galaxy S24", "shop.com")
+        assert len(result) == 1
+
+    def test_rejects_low_quality_batch(self):
+        """Batch of products with same name and no prices is rejected."""
+        products = [
+            ProductResult(name="Menu Item", model_id="", sellers=[]),
+            ProductResult(name="Menu Item", model_id="", sellers=[]),
+            ProductResult(name="Menu Item", model_id="", sellers=[]),
+        ]
+        assert validate_results(products, "", "s.com") == []
+
+    def test_keeps_zero_price_with_url(self):
+        """Products with no price but a valid URL are kept."""
+        products = [
+            ProductResult(name="Product With URL", model_id="P1", sellers=[
+                Seller(name="s.com", price=None, currency="USD", url="https://s.com/p/1"),
+            ]),
+        ]
+        result = validate_results(products, "", "s.com")
+        assert len(result) == 1
+
+    def test_filters_garbage_names(self):
+        """Products with garbage names are filtered out."""
+        products = [
+            ProductResult(name="Valid Product XYZ", model_id="XYZ", sellers=[
+                Seller(name="s.com", price=100, currency="USD", url="https://s.com"),
+            ]),
+        ]
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_garbage_names",
+                   return_value={"Valid Product XYZ"}):
+            result = validate_results(products, "", "s.com")
+        assert len(result) == 0

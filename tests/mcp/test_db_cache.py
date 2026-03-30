@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import pytest
 
+from sqlalchemy import and_, select
+
+from src.backend.db.engine import async_session
+from src.backend.db.models import ScrapingInstruction
 from src.mcp_servers.web_scraper_mcp.db_cache import (
     get_cached_strategy,
+    is_domain_blocked,
+    mark_validation_failure,
     save_strategy,
+    update_failure,
     update_success_rate,
 )
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
+
+
+async def _get_raw_strategy(domain: str, page_type: str = "default") -> ScrapingStrategy | None:
+    """Read strategy directly from DB, bypassing success rate / TTL checks."""
+    async with async_session() as session:
+        stmt = select(ScrapingInstruction).where(
+            and_(
+                ScrapingInstruction.domain == domain,
+                ScrapingInstruction.page_type == page_type,
+            )
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            return None
+        return ScrapingStrategy.from_json(record.strategy_json)
 
 
 @pytest.mark.asyncio
@@ -97,3 +120,97 @@ async def test_success_rate_recovery():
 
     cached = await get_cached_strategy("test-recovery.com")
     assert cached is not None  # Should still be accessible
+
+
+# ---------------------------------------------------------------------------
+# Domain block tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_captcha_blocks_domain():
+    """CAPTCHA failure immediately blocks the domain."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-captcha-block.com", strategy)
+
+    await update_failure("test-captcha-block.com", "cloudflare_captcha")
+
+    assert await is_domain_blocked("test-captcha-block.com") is True
+
+
+@pytest.mark.asyncio
+async def test_waf_blocks_after_threshold():
+    """WAF failures only block after consecutive failure threshold."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-waf-block.com", strategy)
+
+    # Below threshold — not blocked
+    for _ in range(4):
+        await update_failure("test-waf-block.com", "waf_blocked")
+    assert await is_domain_blocked("test-waf-block.com") is False
+
+    # Hit threshold (5th failure)
+    await update_failure("test-waf-block.com", "waf_blocked")
+    assert await is_domain_blocked("test-waf-block.com") is True
+
+
+@pytest.mark.asyncio
+async def test_unblocked_domain():
+    """Domain without block info is not blocked."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-unblocked.com", strategy)
+
+    assert await is_domain_blocked("test-unblocked.com") is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_domain_not_blocked():
+    """Non-existent domain is not blocked."""
+    assert await is_domain_blocked("never-seen-before-12345.com") is False
+
+
+@pytest.mark.asyncio
+async def test_failure_tracking_increments():
+    """Each failure increments consecutive_failures."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-fail-count.com", strategy)
+
+    await update_failure("test-fail-count.com", "http_blocked")
+    await update_failure("test-fail-count.com", "http_blocked")
+
+    # Use raw read (bypasses success rate check which may filter it out)
+    cached = await _get_raw_strategy("test-fail-count.com")
+    assert cached is not None
+    assert cached.consecutive_failures == 2
+    assert cached.last_failure_type == "http_blocked"
+
+
+# ---------------------------------------------------------------------------
+# Validation failure tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validation_failure_below_threshold():
+    """Below threshold, mark_validation_failure returns False."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-val-ok.com", strategy)
+
+    result = await mark_validation_failure("test-val-ok.com")
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_validation_failure_exceeds_threshold():
+    """At threshold, mark_validation_failure returns True and zeros success rate."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-val-stale.com", strategy)
+
+    await mark_validation_failure("test-val-stale.com")
+    await mark_validation_failure("test-val-stale.com")
+    result = await mark_validation_failure("test-val-stale.com")
+
+    assert result is True
+    # Strategy should be invalidated (success_rate = 0)
+    cached = await get_cached_strategy("test-val-stale.com")
+    assert cached is None  # Below success rate threshold

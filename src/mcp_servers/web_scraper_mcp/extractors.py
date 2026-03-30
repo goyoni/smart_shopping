@@ -974,27 +974,51 @@ def validate_results(
     """Filter out low-quality extraction results.
 
     Returns the cleaned list, or empty if everything was rejected.
+    Applies both per-product checks and batch-level quality checks.
     """
     garbage = get_garbage_names()
     valid: list[ProductResult] = []
 
     for p in products:
+        # Name checks
         if not p.name or len(p.name) < 3:
             continue
-        if p.name in garbage:
+        if p.name.strip() in garbage:
             continue
-        # Reject products where all sellers have insane prices
+        # Reject very short generic names (likely nav items)
+        if len(p.name) < 5 and not p.model_id:
+            continue
+
+        # Price sanity
         if p.sellers and all(
-            s.price is not None and s.price > _MAX_SANE_PRICE
+            s.price is not None and (s.price > _MAX_SANE_PRICE or s.price < 0)
             for s in p.sellers
         ):
             continue
+
         # Must have at least a name and either a price or a URL
-        has_price = any(s.price is not None for s in p.sellers)
+        has_price = any(s.price is not None and s.price > 0 for s in p.sellers)
         has_url = any(s.url for s in p.sellers)
         if not has_price and not has_url:
             continue
+
         valid.append(p)
+
+    # Batch-level quality checks
+    if _is_low_quality_batch(valid):
+        return []
+
+    # Duplicate name check: if >50% share the same name, likely wrong selector
+    if len(valid) > 3:
+        names = [p.name for p in valid]
+        most_common = max(set(names), key=names.count)
+        if names.count(most_common) > len(names) * 0.5:
+            # Only reject if names are short/generic (not a comparison page)
+            if len(most_common) < 30 and not any(
+                s.price is not None and s.price > 0
+                for p in valid for s in p.sellers
+            ):
+                return []
 
     return valid
 
