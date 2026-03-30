@@ -8,6 +8,7 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from src.mcp_servers.web_scraper_mcp.db_cache import get_cached_strategy, get_domain_health, save_strategy
+from src.mcp_servers.web_scraper_mcp.health_check import check_all_strategies, get_stale_strategies
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.browser import get_browser
@@ -71,6 +72,24 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="check_strategy_health",
+            description=(
+                "Run health checks on stale or degraded scraping strategies. "
+                "Probes each domain's last successful URL to verify the cached "
+                "strategy still works. Use dry_run=true to list what would be checked."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true, list stale strategies without probing them",
+                        "default": False,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -101,5 +120,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif name == "domain_health":
         health = await get_domain_health()
         return [TextContent(type="text", text=json.dumps({"domains": health, "count": len(health)}))]
+
+    elif name == "check_strategy_health":
+        dry_run = arguments.get("dry_run", False)
+        if dry_run:
+            stale = await get_stale_strategies()
+            return [TextContent(type="text", text=json.dumps({"stale": stale, "count": len(stale), "dry_run": True}))]
+        async with get_browser() as browser:
+            results = await check_all_strategies(browser)
+        return [TextContent(type="text", text=json.dumps({"results": results, "count": len(results), "dry_run": False}))]
 
     raise ValueError(f"Unknown tool: {name}")
