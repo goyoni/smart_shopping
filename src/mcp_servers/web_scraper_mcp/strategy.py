@@ -106,6 +106,8 @@ class ScrapingStrategy:
     currency_hint: str = ""
     version: int = 1
     discovery_method: str = "css_candidates"
+    access_method: str = ""
+    extraction_method: str = ""
     criteria_selectors: dict[str, str] = field(default_factory=dict)
     # Data-attribute extraction: when set, read these attributes from the
     # container element itself instead of using sub-selector + inner_text.

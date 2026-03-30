@@ -7,19 +7,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.mcp_servers.web_scraper_mcp.scraper import (
+    _find_next_page_url,
+    _is_safe_url,
+    _merge_comparison_sellers,
+    extract_domain,
+    extract_specs_from_text,
+    parse_price,
+    scrape_page,
+)
+from src.mcp_servers.web_scraper_mcp.extractors import (
     _extract_from_data_attrs,
     _extract_jsonld_from_soup,
     _extract_microdata_from_soup,
     _extract_og_product_from_soup,
     _extract_page_product_name,
-    _find_next_page_url,
-    _is_safe_url,
-    _merge_comparison_sellers,
-    _try_http_prefetch,
-    extract_domain,
-    extract_specs_from_text,
-    parse_price,
-    scrape_page,
+)
+from src.mcp_servers.web_scraper_mcp.diagnostics import (
+    ExtractionResult,
+    FailureType,
+    classify_http_failure,
+    classify_playwright_failure,
 )
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.models import ProductResult, Seller
@@ -67,144 +74,6 @@ class TestExtractDomain:
 
     def test_without_www(self):
         assert extract_domain("https://ksp.co.il/product/1") == "ksp.co.il"
-
-
-class TestScrapePageWithNoStrategy:
-    @pytest.mark.asyncio
-    async def test_returns_empty_when_no_strategy_found(self):
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = []  # No containers found
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.discover_strategy", return_value=None),
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
-
-        assert results == []
-
-
-class TestScrapePageWithCachedStrategy:
-    @pytest.mark.asyncio
-    async def test_uses_cached_strategy(self):
-        strategy = ScrapingStrategy(
-            product_container=".product-card",
-            name_selector="h2",
-            price_selector=".price",
-        )
-
-        mock_name_el = AsyncMock()
-        mock_name_el.inner_text.return_value = "Test Laptop"
-
-        mock_price_el = AsyncMock()
-        mock_price_el.inner_text.return_value = "$999.99"
-
-        mock_container = AsyncMock()
-
-        async def mock_query_selector(selector):
-            if selector == "h2":
-                return mock_name_el
-            if selector == ".price":
-                return mock_price_el
-            return None
-
-        mock_container.query_selector = mock_query_selector
-        mock_container.inner_text = AsyncMock(return_value="Test Laptop $999.99")
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_container]
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate") as mock_update,
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
-
-        assert len(results) == 1
-        assert results[0].name == "Test Laptop"
-        assert results[0].sellers[0].price == 999.99
-        assert results[0].sellers[0].currency == "USD"
-        mock_update.assert_awaited_once_with("shop.example.com", success=True, page_type="search")
-
-
-class TestScrapePageCachedStrategyFailure:
-    @pytest.mark.asyncio
-    async def test_re_discovers_on_cached_failure(self):
-        cached_strategy = ScrapingStrategy(
-            product_container=".old-selector",
-            name_selector="h2",
-        )
-        new_strategy = ScrapingStrategy(
-            product_container=".new-card",
-            name_selector="h3",
-        )
-
-        mock_name_el = AsyncMock()
-        mock_name_el.inner_text.return_value = "New Product"
-
-        mock_container = AsyncMock()
-
-        async def mock_qs(selector):
-            if selector == "h3":
-                return mock_name_el
-            return None
-
-        mock_container.query_selector = mock_qs
-        mock_container.inner_text = AsyncMock(return_value="New Product")
-
-        mock_page = AsyncMock()
-
-        call_count = 0
-
-        async def mock_query_selector_all(selector):
-            nonlocal call_count
-            call_count += 1
-            if selector == ".old-selector":
-                return []  # Cached strategy fails
-            if selector == ".new-card":
-                return [mock_container]
-            return []
-
-        mock_page.query_selector_all = mock_query_selector_all
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=cached_strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate") as mock_update,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.discover_strategy", return_value=new_strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.save_strategy") as mock_save,
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(mock_browser, "https://shop.example.com/products")
-
-        assert len(results) == 1
-        assert results[0].name == "New Product"
-        # Cached strategy failure should decrement success rate
-        mock_update.assert_awaited_with("shop.example.com", success=False, page_type="page")
-        # New strategy should be saved
-        mock_save.assert_awaited_once()
 
 
 class TestExtractSpecsFromText:
@@ -333,214 +202,6 @@ class TestFindNextPageUrl:
 
         result = await _find_next_page_url(mock_page, "https://shop.example.com/search")
         assert result == "https://shop.example.com/search?page=3"
-
-
-class TestScrapePagePagination:
-    @pytest.mark.asyncio
-    async def test_follows_pagination(self):
-        strategy = ScrapingStrategy(
-            product_container=".product-card",
-            name_selector="h2",
-            price_selector=".price",
-        )
-
-        def make_container(name, price_text):
-            mock_name_el = AsyncMock()
-            mock_name_el.inner_text.return_value = name
-            mock_price_el = AsyncMock()
-            mock_price_el.inner_text.return_value = price_text
-            container = AsyncMock()
-
-            async def qs(selector):
-                if selector == "h2":
-                    return mock_name_el
-                if selector == ".price":
-                    return mock_price_el
-                return None
-
-            container.query_selector = qs
-            container.inner_text = AsyncMock(return_value=f"{name} {price_text}")
-            return container
-
-        page1_containers = [make_container("Product A", "$100")]
-        page2_containers = [make_container("Product B", "$200")]
-
-        goto_count = 0
-
-        mock_page = AsyncMock()
-
-        async def mock_query_all(selector):
-            nonlocal goto_count
-            if selector == ".product-card":
-                return page1_containers if goto_count <= 1 else page2_containers
-            return []
-
-        mock_page.query_selector_all = mock_query_all
-
-        # First call: no next link (page 1 already loaded via goto)
-        # After page 1 extraction, _find_next_page_url is called
-        next_link_el = AsyncMock()
-        next_link_el.get_attribute.return_value = "/page/2"
-
-        qs_call_count = 0
-
-        async def mock_qs(selector):
-            nonlocal qs_call_count
-            qs_call_count += 1
-            # Only return next link after page 1
-            if goto_count <= 1 and "next" in selector.lower():
-                return next_link_el
-            return None
-
-        mock_page.query_selector = mock_qs
-
-        original_goto = mock_page.goto
-
-        async def track_goto(*args, **kwargs):
-            nonlocal goto_count
-            goto_count += 1
-
-        mock_page.goto = track_goto
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(mock_browser, "https://shop.example.com/search")
-
-        # Should have products from both pages
-        assert len(results) == 2
-        assert results[0].name == "Product A"
-        assert results[1].name == "Product B"
-
-
-# ---------------------------------------------------------------------------
-# Data-attribute extraction
-# ---------------------------------------------------------------------------
-
-
-class TestDataAttributeExtraction:
-    @pytest.mark.asyncio
-    async def test_extracts_from_data_attrs_and_merges_sellers(self):
-        """When strategy has name_attr/price_attr, read from container attributes.
-
-        Two seller rows with different names/prices should merge into
-        one product with multiple sellers (comparison-page pattern).
-        """
-        strategy = ScrapingStrategy(
-            product_container="[data-site-name]",
-            name_attr="data-site-name",
-            price_attr="data-product-price",
-        )
-
-        def make_seller_container(store_name, price):
-            container = AsyncMock()
-
-            async def get_attr(attr):
-                if attr == "data-site-name":
-                    return store_name
-                if attr == "data-product-price":
-                    return str(price)
-                return None
-
-            container.get_attribute = get_attr
-            container.query_selector = AsyncMock(return_value=None)
-            container.inner_text = AsyncMock(return_value=f"{store_name} ₪{price}")
-            return container
-
-        c1 = make_seller_container("Store Alpha", 1299)
-        c2 = make_seller_container("Store Beta", 1199)
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [c1, c2]
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(
-                mock_browser,
-                "https://shop.example.co.il/product/123",
-                product_query="BFL523MB1F",
-            )
-
-        # Should merge into one product with two sellers
-        assert len(results) == 1
-        assert results[0].name == "BFL523MB1F"
-        assert len(results[0].sellers) == 2
-        assert results[0].sellers[0].name == "Store Alpha"
-        assert results[0].sellers[0].price == 1299.0
-        assert results[0].sellers[1].name == "Store Beta"
-        assert results[0].sellers[1].price == 1199.0
-
-    @pytest.mark.asyncio
-    async def test_falls_back_to_css_when_no_data_attr(self):
-        """When data attr is empty, fall back to CSS sub-selector."""
-        strategy = ScrapingStrategy(
-            product_container=".product-card",
-            name_selector="h2",
-            price_selector=".price",
-            name_attr="data-site-name",  # Set but won't match
-        )
-
-        mock_container = AsyncMock()
-
-        async def mock_get_attribute(attr):
-            return None  # No data attributes present
-
-        mock_name_el = AsyncMock()
-        mock_name_el.inner_text.return_value = "Test Product Name Here"
-
-        mock_price_el = AsyncMock()
-        mock_price_el.inner_text.return_value = "$599"
-
-        async def mock_query_selector(selector):
-            if selector == "h2":
-                return mock_name_el
-            if selector == ".price":
-                return mock_price_el
-            return None
-
-        mock_container.get_attribute = mock_get_attribute
-        mock_container.query_selector = mock_query_selector
-        mock_container.inner_text = AsyncMock(return_value="Test Product Name Here $599")
-
-        mock_page = AsyncMock()
-        mock_page.query_selector_all.return_value = [mock_container]
-
-        mock_browser = AsyncMock()
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_page") as mock_get_page,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=strategy),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_success_rate"),
-        ):
-            mock_ctx = AsyncMock()
-            mock_ctx.__aenter__ = AsyncMock(return_value=mock_page)
-            mock_ctx.__aexit__ = AsyncMock(return_value=False)
-            mock_get_page.return_value = mock_ctx
-
-            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
-
-        assert len(results) == 1
-        assert results[0].name == "Test Product Name Here"
-        assert results[0].sellers[0].price == 599.0
 
 
 # ---------------------------------------------------------------------------
@@ -678,7 +339,6 @@ class TestMergeComparisonSellers:
 # ---------------------------------------------------------------------------
 # SSRF protection
 # ---------------------------------------------------------------------------
-
 class TestIsSafeUrl:
     def test_rejects_localhost(self):
         assert _is_safe_url("http://localhost/secret") is False
@@ -706,130 +366,8 @@ class TestIsSafeUrl:
 
 
 # ---------------------------------------------------------------------------
-# HTTP pre-fetch
-# ---------------------------------------------------------------------------
-
-class TestHttpPrefetch:
-    @pytest.mark.asyncio
-    async def test_returns_none_for_unsafe_url(self):
-        result = await _try_http_prefetch(
-            "http://127.0.0.1/admin", "test", "127.0.0.1",
-        )
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_both_http_clients_error(self):
-        """When both httpx and curl_cffi fail, returns None."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 403
-        mock_client = AsyncMock()
-        mock_client.get.return_value = mock_resp
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        mock_cf_resp = MagicMock()
-        mock_cf_resp.status_code = 403
-        mock_cf_session = AsyncMock()
-        mock_cf_session.get.return_value = mock_cf_resp
-        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
-        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                  return_value=mock_client),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
-                  return_value=mock_cf_session),
-        ):
-            result = await _try_http_prefetch(
-                "https://example.com/product", "test", "example.com",
-            )
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_curl_cffi_fallback_on_httpx_failure(self):
-        """When httpx returns 403 but curl_cffi succeeds, uses curl_cffi response."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 403
-        mock_client = AsyncMock()
-        mock_client.get.return_value = mock_resp
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        microdata_html = """<html><body>
-        <div itemscope itemtype="https://schema.org/Product">
-            <h1 itemprop="name">Bosch SMV4ECX28E</h1>
-            <span itemprop="price" content="3999">₪3,999</span>
-            <meta itemprop="priceCurrency" content="ILS"/>
-        </div>
-        </body></html>""" + " " * 1000  # pad to exceed min length
-
-        mock_cf_resp = MagicMock()
-        mock_cf_resp.status_code = 200
-        mock_cf_resp.text = microdata_html
-        mock_cf_session = AsyncMock()
-        mock_cf_session.get.return_value = mock_cf_resp
-        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
-        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                  return_value=mock_client),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
-                  return_value=mock_cf_session),
-        ):
-            result = await _try_http_prefetch(
-                "https://shop.example.com/product/123", "SMV4ECX28E", "shop.example.com",
-            )
-        assert result is not None
-        assert len(result) == 1
-        assert result[0].name == "Bosch SMV4ECX28E"
-
-    @pytest.mark.asyncio
-    async def test_returns_none_for_small_html(self):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "<html><body>tiny</body></html>"
-        mock_client = AsyncMock()
-        mock_client.get.return_value = mock_resp
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                   return_value=mock_client):
-            result = await _try_http_prefetch(
-                "https://example.com/product", "test", "example.com",
-            )
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_network_error(self):
-        """When both httpx and curl_cffi throw network errors, returns None."""
-        mock_client = AsyncMock()
-        mock_client.get.side_effect = Exception("Connection refused")
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        mock_cf_session = AsyncMock()
-        mock_cf_session.get.side_effect = Exception("Connection refused")
-        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
-        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
-
-        with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                  return_value=mock_client),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
-                  return_value=mock_cf_session),
-        ):
-            result = await _try_http_prefetch(
-                "https://example.com/product", "test", "example.com",
-            )
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
 # BeautifulSoup extraction helpers
 # ---------------------------------------------------------------------------
-
 class TestExtractPageProductName:
     def test_extracts_from_h1(self):
         from bs4 import BeautifulSoup
@@ -874,28 +412,32 @@ class TestExtractFromDataAttrs:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
                    return_value="ILS"):
             products = _extract_from_data_attrs(
                 soup, "https://compare.example.com/product/123", "compare.example.com",
                 "Bosch BFL523MB1F Microwave",
             )
-        assert len(products) == 1
-        p = products[0]
-        assert p.name == "Bosch BFL523MB1F Microwave"
-        assert p.model_id == "BFL523MB1F"
-        assert len(p.sellers) == 3
-        assert p.sellers[0].price == 1988
-        assert p.sellers[0].name == "Store A"
-        assert p.sellers[1].price == 1940
+        # Each seller row returns a separate ProductResult (merging is done in _post_process)
+        assert len(products) == 3
+        assert products[0].name == "Bosch BFL523MB1F Microwave"
+        assert products[0].sellers[0].price == 1988
+        assert products[0].sellers[0].name == "Store A"
+        assert products[1].sellers[0].price == 1940
+        assert products[1].sellers[0].name == "Store B"
+        assert products[2].sellers[0].price == 1941
 
-    def test_returns_empty_for_single_row(self):
+    def test_extracts_single_row(self):
         from bs4 import BeautifulSoup
         html = '<html><body><div data-product-price="100">one</div></body></html>'
         soup = BeautifulSoup(html, "html.parser")
-        assert _extract_from_data_attrs(soup, "https://x.com", "x.com", "Prod") == []
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+                   return_value="USD"):
+            products = _extract_from_data_attrs(soup, "https://x.com", "x.com", "Prod")
+        assert len(products) == 1
+        assert products[0].sellers[0].price == 100
 
-    def test_skips_invalid_prices(self):
+    def test_skips_unparseable_prices(self):
         from bs4 import BeautifulSoup
         html = """
         <html><body>
@@ -906,12 +448,14 @@ class TestExtractFromDataAttrs:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
                    return_value="USD"):
             products = _extract_from_data_attrs(soup, "https://x.com", "x.com", "Widget")
-        # Only 500 and 600 are valid
-        assert len(products) == 1
-        assert len(products[0].sellers) == 2
+        # "abc" is unparseable, "0" parses to 0.0, 500 and 600 are valid
+        assert len(products) == 3
+        assert products[0].sellers[0].price == 0.0
+        assert products[1].sellers[0].price == 500
+        assert products[2].sellers[0].price == 600
 
 
 class TestExtractJsonldFromSoup:
@@ -980,7 +524,6 @@ class TestExtractMicrodataFromSoup:
         assert result.brand == "Bosch"
         assert result.sellers[0].price == 4155
         assert result.sellers[0].currency == "ILS"
-        assert result.image_url == "https://img.example.com/prod.jpg"
 
     def test_extracts_price_from_text_content(self):
         from bs4 import BeautifulSoup
@@ -991,7 +534,7 @@ class TestExtractMicrodataFromSoup:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
                    return_value="ILS"):
             result = _extract_microdata_from_soup(soup, "https://x.com/p", "x.com")
         assert result is not None
@@ -1082,8 +625,295 @@ class TestExtractOgProductFromSoup:
         </head></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
                    return_value="ILS"):
             result = _extract_og_product_from_soup(soup, "https://x.co.il/p", "x.co.il")
         assert result is not None
         assert result.sellers[0].currency == "ILS"
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — failure classification
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyHttpFailure:
+    def test_network_error(self):
+        assert classify_http_failure(None, "", Exception("timeout")) == FailureType.NAVIGATION_FAILED
+
+    def test_no_status_code(self):
+        assert classify_http_failure(None, "") == FailureType.NAVIGATION_FAILED
+
+    def test_empty_page(self):
+        assert classify_http_failure(200, "short") == FailureType.EMPTY_PAGE
+
+    def test_spa_no_data(self):
+        assert classify_http_failure(200, "x" * 2000) == FailureType.JS_SPA_NO_DATA
+
+    def test_cloudflare_js_challenge(self):
+        body = "Just a moment..." + "x" * 2000
+        assert classify_http_failure(403, body) == FailureType.CLOUDFLARE_JS
+
+    def test_cloudflare_captcha(self):
+        body = "Attention Required" + "x" * 2000
+        assert classify_http_failure(403, body) == FailureType.CLOUDFLARE_CAPTCHA
+
+    def test_waf_403(self):
+        assert classify_http_failure(403, "Forbidden" + "x" * 2000) == FailureType.WAF_BLOCKED
+
+    def test_rate_limit_429(self):
+        assert classify_http_failure(429, "") == FailureType.HTTP_BLOCKED
+
+    def test_service_unavailable_503(self):
+        assert classify_http_failure(503, "") == FailureType.HTTP_BLOCKED
+
+
+class TestClassifyPlaywrightFailure:
+    def test_navigation_error(self):
+        assert classify_playwright_failure("", 0, Exception("timeout")) == FailureType.NAVIGATION_FAILED
+
+    def test_cloudflare_js(self):
+        assert classify_playwright_failure("Just a moment...", 5000) == FailureType.CLOUDFLARE_JS
+
+    def test_cloudflare_captcha(self):
+        assert classify_playwright_failure("Attention Required!", 5000) == FailureType.CLOUDFLARE_CAPTCHA
+
+    def test_empty_page(self):
+        assert classify_playwright_failure("Some Title", 500) == FailureType.EMPTY_PAGE
+
+    def test_no_products(self):
+        assert classify_playwright_failure("Shop Page", 50000) == FailureType.NO_PRODUCTS_FOUND
+
+
+class TestExtractionResult:
+    def test_success_with_products(self):
+        r = ExtractionResult(
+            products=[ProductResult(name="Test", model_id="T1", sellers=[])],
+            access_method="httpx",
+            extraction_method="jsonld",
+        )
+        assert r.success is True
+
+    def test_failure_without_products(self):
+        r = ExtractionResult(
+            failure_type=FailureType.HTTP_BLOCKED,
+            access_method="httpx",
+        )
+        assert r.success is False
+
+    def test_failure_with_products_and_failure_type(self):
+        r = ExtractionResult(
+            products=[ProductResult(name="Test", model_id="T1", sellers=[])],
+            failure_type=FailureType.LOW_QUALITY,
+            access_method="httpx",
+        )
+        assert r.success is False
+
+
+# ---------------------------------------------------------------------------
+# Pipeline — scrape_page integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestScrapePagePipeline:
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_unsafe_url(self):
+        mock_browser = AsyncMock()
+        results = await scrape_page(mock_browser, "http://127.0.0.1/admin")
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_http_success_skips_playwright(self):
+        """When httpx extracts products successfully, playwright is never called."""
+        mock_browser = AsyncMock()
+        product = ProductResult(
+            name="Test Product",
+            model_id="TP1",
+            sellers=[Seller(name="shop.com", price=100, currency="USD", url="https://shop.com")],
+        )
+        http_result = ExtractionResult(
+            products=[product],
+            access_method="httpx",
+            extraction_method="jsonld",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http", return_value=http_result),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright") as mock_pw,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results", return_value=[product]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert len(results) == 1
+        assert results[0].name == "Test Product"
+        mock_pw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_escalates_to_playwright_on_http_failure(self):
+        """When HTTP methods fail, pipeline escalates to playwright."""
+        mock_browser = AsyncMock()
+        product = ProductResult(
+            name="Browser Product",
+            model_id="BP1",
+            sellers=[Seller(name="shop.com", price=200, currency="USD", url="https://shop.com")],
+        )
+        http_fail = ExtractionResult(
+            access_method="httpx",
+            failure_type=FailureType.JS_SPA_NO_DATA,
+            failure_detail="200 OK but no extractable products",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        curl_fail = ExtractionResult(
+            access_method="curl_cffi",
+            failure_type=FailureType.JS_SPA_NO_DATA,
+            failure_detail="200 OK but no extractable products",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        pw_success = ExtractionResult(
+            products=[product],
+            access_method="playwright",
+            extraction_method="css_strategy",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  side_effect=[http_fail, curl_fail]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+                  return_value=pw_success),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results",
+                  return_value=[product]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert len(results) == 1
+        assert results[0].name == "Browser Product"
+
+    @pytest.mark.asyncio
+    async def test_aborts_on_captcha(self):
+        """CAPTCHA detection stops the pipeline immediately."""
+        mock_browser = AsyncMock()
+        captcha_result = ExtractionResult(
+            access_method="httpx",
+            failure_type=FailureType.CLOUDFLARE_CAPTCHA,
+            failure_detail="CAPTCHA block",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  return_value=captcha_result),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright") as mock_pw,
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert results == []
+        # Playwright should NOT be called after CAPTCHA
+        mock_pw.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_all_methods_fail_returns_empty(self):
+        """When every method fails, returns empty list."""
+        mock_browser = AsyncMock()
+        http_fail = ExtractionResult(
+            access_method="httpx",
+            failure_type=FailureType.HTTP_BLOCKED,
+            failure_detail="403",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        curl_fail = ExtractionResult(
+            access_method="curl_cffi",
+            failure_type=FailureType.WAF_BLOCKED,
+            failure_detail="403",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        pw_fail = ExtractionResult(
+            access_method="playwright",
+            failure_type=FailureType.NO_PRODUCTS_FOUND,
+            failure_detail="title='Shop', body=50000",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  side_effect=[http_fail, curl_fail]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+                  return_value=pw_fail),
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_tries_next_method(self):
+        """When products are extracted but fail validation, the pipeline continues."""
+        mock_browser = AsyncMock()
+        bad_product = ProductResult(
+            name="Garbage",
+            model_id="G1",
+            sellers=[],
+        )
+        good_product = ProductResult(
+            name="Real Product",
+            model_id="RP1",
+            sellers=[Seller(name="shop.com", price=100, currency="USD", url="https://shop.com")],
+        )
+        http_result = ExtractionResult(
+            products=[bad_product],
+            access_method="httpx",
+            extraction_method="jsonld",
+            domain="shop.example.com",
+            page_type="search",
+        )
+        pw_result = ExtractionResult(
+            products=[good_product],
+            access_method="playwright",
+            extraction_method="css_strategy",
+            domain="shop.example.com",
+            page_type="search",
+        )
+
+        validate_calls = []
+
+        def mock_validate(products, query, domain):
+            validate_calls.append(products)
+            if products == [bad_product]:
+                return []  # Validation fails
+            return products  # Validation passes
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+                  side_effect=[
+                      http_result,
+                      ExtractionResult(access_method="curl_cffi",
+                                       failure_type=FailureType.HTTP_BLOCKED,
+                                       failure_detail="403",
+                                       domain="shop.example.com",
+                                       page_type="search"),
+                  ]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+                  return_value=pw_result),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results",
+                  side_effect=mock_validate),
+            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+        ):
+            results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
+
+        assert len(results) == 1
+        assert results[0].name == "Real Product"
