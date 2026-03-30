@@ -147,9 +147,10 @@ async def update_failure(
         strategy = ScrapingStrategy.from_json(record.strategy_json)
         strategy.consecutive_failures += 1
         strategy.last_failure_type = failure_type
+        now_iso = datetime.now(timezone.utc).isoformat()
+        strategy.last_failure_at = now_iso
 
         # Detect blocks based on failure type
-        now_iso = datetime.now(timezone.utc).isoformat()
         if failure_type == "cloudflare_captcha":
             strategy.block_type = "captcha"
             strategy.blocked_at = now_iso
@@ -247,3 +248,58 @@ async def mark_validation_failure(
         record.updated_at = datetime.now(timezone.utc)
         await session.commit()
         return exceeded
+
+
+async def get_domain_health() -> list[dict]:
+    """Return health summary for all tracked domains.
+
+    Each entry includes domain, page_type, status (healthy/degraded/blocked),
+    success_rate, failure metadata, and strategy info.
+    """
+    async with async_session() as session:
+        stmt = select(ScrapingInstruction)
+        result = await session.execute(stmt)
+        records = result.scalars().all()
+
+        health: list[dict] = []
+        now = datetime.now(timezone.utc)
+
+        for record in records:
+            strategy = ScrapingStrategy.from_json(record.strategy_json)
+
+            # Determine status
+            if strategy.block_type:
+                try:
+                    blocked_at = datetime.fromisoformat(strategy.blocked_at)
+                    if blocked_at.tzinfo is None:
+                        blocked_at = blocked_at.replace(tzinfo=timezone.utc)
+                    block_hours = _CAPTCHA_BLOCK_HOURS if strategy.block_type == "captcha" else _WAF_BLOCK_HOURS
+                    if now - blocked_at < timedelta(hours=block_hours):
+                        status = "blocked"
+                    else:
+                        status = "degraded"  # Block expired but hasn't recovered
+                except (ValueError, TypeError):
+                    status = "blocked"
+            elif record.success_rate < _MIN_SUCCESS_RATE:
+                status = "degraded"
+            else:
+                status = "healthy"
+
+            health.append({
+                "domain": record.domain,
+                "page_type": record.page_type,
+                "status": status,
+                "success_rate": round(record.success_rate, 3),
+                "access_method": strategy.access_method,
+                "extraction_method": strategy.extraction_method,
+                "block_type": strategy.block_type or None,
+                "blocked_at": strategy.blocked_at or None,
+                "last_failure_type": strategy.last_failure_type or None,
+                "last_failure_at": strategy.last_failure_at or None,
+                "consecutive_failures": strategy.consecutive_failures,
+                "validation_failures": strategy.validation_failures,
+                "last_successful_url": strategy.last_successful_url or None,
+                "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+            })
+
+        return health

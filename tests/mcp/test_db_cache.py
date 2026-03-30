@@ -10,6 +10,7 @@ from src.backend.db.engine import async_session
 from src.backend.db.models import ScrapingInstruction
 from src.mcp_servers.web_scraper_mcp.db_cache import (
     get_cached_strategy,
+    get_domain_health,
     is_domain_blocked,
     mark_validation_failure,
     save_strategy,
@@ -214,3 +215,84 @@ async def test_validation_failure_exceeds_threshold():
     # Strategy should be invalidated (success_rate = 0)
     cached = await get_cached_strategy("test-val-stale.com")
     assert cached is None  # Below success rate threshold
+
+
+# ---------------------------------------------------------------------------
+# Failure timestamp tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failure_records_timestamp():
+    """update_failure sets last_failure_at."""
+    strategy = ScrapingStrategy(product_container=".card")
+    await save_strategy("test-fail-ts.com", strategy)
+
+    await update_failure("test-fail-ts.com", "waf_blocked")
+
+    cached = await _get_raw_strategy("test-fail-ts.com")
+    assert cached is not None
+    assert cached.last_failure_at != ""
+    assert "T" in cached.last_failure_at  # ISO format
+
+
+# ---------------------------------------------------------------------------
+# Domain health diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_domain_health_returns_all_domains():
+    """get_domain_health returns entries for all tracked domains."""
+    await save_strategy("test-health-a.com", ScrapingStrategy(
+        product_container=".card", access_method="httpx", extraction_method="jsonld",
+    ))
+    await save_strategy("test-health-b.com", ScrapingStrategy(
+        product_container=".card", access_method="playwright", extraction_method="css_strategy",
+    ))
+
+    health = await get_domain_health()
+    domains = {h["domain"] for h in health}
+    assert "test-health-a.com" in domains
+    assert "test-health-b.com" in domains
+
+
+@pytest.mark.asyncio
+async def test_domain_health_healthy_status():
+    """A domain with good success rate shows as healthy."""
+    await save_strategy("test-health-ok.com", ScrapingStrategy(product_container=".card"))
+
+    health = await get_domain_health()
+    entry = next(h for h in health if h["domain"] == "test-health-ok.com")
+    assert entry["status"] == "healthy"
+    assert entry["success_rate"] == 1.0
+    assert entry["block_type"] is None
+
+
+@pytest.mark.asyncio
+async def test_domain_health_blocked_status():
+    """A CAPTCHA-blocked domain shows as blocked."""
+    await save_strategy("test-health-blocked.com", ScrapingStrategy(product_container=".card"))
+    await update_failure("test-health-blocked.com", "cloudflare_captcha")
+
+    health = await get_domain_health()
+    entry = next(h for h in health if h["domain"] == "test-health-blocked.com")
+    assert entry["status"] == "blocked"
+    assert entry["block_type"] == "captcha"
+    assert entry["last_failure_type"] == "cloudflare_captcha"
+    assert entry["consecutive_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_domain_health_degraded_status():
+    """A domain with low success rate shows as degraded."""
+    await save_strategy("test-health-deg.com", ScrapingStrategy(product_container=".card"))
+    # Drop success rate below threshold
+    await update_success_rate("test-health-deg.com", success=False)
+    await update_success_rate("test-health-deg.com", success=False)
+    await update_success_rate("test-health-deg.com", success=False)
+
+    health = await get_domain_health()
+    entry = next(h for h in health if h["domain"] == "test-health-deg.com")
+    assert entry["status"] == "degraded"
+    assert entry["success_rate"] < 0.5

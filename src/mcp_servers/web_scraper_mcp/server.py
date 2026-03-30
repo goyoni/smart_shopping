@@ -7,7 +7,7 @@ import json
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
-from src.mcp_servers.web_scraper_mcp.db_cache import get_cached_strategy, save_strategy
+from src.mcp_servers.web_scraper_mcp.db_cache import get_cached_strategy, get_domain_health, save_strategy
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.browser import get_browser
@@ -59,6 +59,18 @@ async def list_tools() -> list[Tool]:
                 "required": ["domain", "strategy"],
             },
         ),
+        Tool(
+            name="domain_health",
+            description=(
+                "Get health status for all tracked domains. Returns each domain's "
+                "status (healthy/degraded/blocked), success rate, failure history, "
+                "and cached strategy info."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
 
 
@@ -85,5 +97,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         strategy = ScrapingStrategy(**strategy_data)
         await save_strategy(domain, strategy)
         return [TextContent(type="text", text=json.dumps({"status": "saved"}))]
+
+    elif name == "domain_health":
+        health = await get_domain_health()
+        return [TextContent(type="text", text=json.dumps({"domains": health, "count": len(health)}))]
 
     raise ValueError(f"Unknown tool: {name}")

@@ -112,6 +112,7 @@ class ScrapingStrategy:
     block_type: str = ""          # "captcha", "waf", "" (not blocked)
     blocked_at: str = ""          # ISO timestamp when block was detected
     last_failure_type: str = ""   # FailureType.value from last failure
+    last_failure_at: str = ""     # ISO timestamp of last failure
     consecutive_failures: int = 0
     validation_failures: int = 0  # Consecutive validation-quality failures
     last_successful_url: str = "" # Probe URL for health checks
