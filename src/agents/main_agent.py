@@ -89,6 +89,14 @@ def detect_model_ids(query: str) -> list[str]:
         flags=re.IGNORECASE,
     )
 
+    # Strip location suffixes like "in israel", "in germany"
+    cleaned = re.sub(
+        r"\s+in\s+\w+$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
     # Split on comma, semicolon, " and ", or " vs "
     parts = re.split(r"[,;]\s*|\s+(?:and|vs\.?)\s+", cleaned)
     parts = [p.strip() for p in parts if p.strip()]
@@ -305,7 +313,7 @@ class MainAgent:
                         {"url": r.url, "title": r.title, "snippet": r.snippet}
                         for r in search_results
                     ]
-                    ecommerce_signals = identify_ecommerce_sites(urls_data)
+                    ecommerce_signals = identify_ecommerce_sites(urls_data, market=market)
                     ecom_op.set_attribute("ecommerce_count", len(ecommerce_signals))
                     ecom_op.set_attribute(
                         "output",
@@ -362,7 +370,18 @@ class MainAgent:
                                     site_op.set_attribute("output", json.dumps({
                                         "url": signal.url,
                                         "product_count": len(products),
-                                    }))
+                                        "products": [
+                                            {
+                                                "name": p.name[:100],
+                                                "model_id": p.model_id,
+                                                "brand": p.brand,
+                                                "price": p.sellers[0].price if p.sellers else None,
+                                                "currency": p.sellers[0].currency if p.sellers else None,
+                                                "seller_count": len(p.sellers),
+                                            }
+                                            for p in products[:20]
+                                        ],
+                                    }, ensure_ascii=False))
                             except Exception:
                                 logger.warning("Failed to scrape %s", signal.url, exc_info=True)
                                 continue
@@ -473,27 +492,119 @@ class MainAgent:
         """
         locale = _build_locale(language, market)
 
+        def _is_useful_url(url: str, model_id: str) -> bool:
+            """Reject homepage and generic category URLs that won't have product data."""
+            from urllib.parse import urlparse as _urlparse
+
+            parsed = _urlparse(url)
+            path = (parsed.path or "/").rstrip("/")
+            query = parsed.query or ""
+            mid_lower = model_id.lower()
+
+            # Always scrape if URL contains the model ID
+            if mid_lower in url.lower():
+                return True
+
+            # Reject bare homepage
+            if path in ("", "/", "/index.html", "/index.php"):
+                return False
+
+            # Reject generic category/landing pages (no query params, short path)
+            if not query and path.count("/") <= 1:
+                # e.g. /sales.html, /cellphones.html, /printers.html
+                return False
+
+            return True
+
         async def _scrape_urls(
             browser: object,
             urls: list[str],
             model_id: str,
         ) -> list[ProductResult]:
             """Scrape a list of URLs and return products relevant to model_id."""
+            from urllib.parse import urlparse as _urlparse
+
             products: list[ProductResult] = []
             mid_lower = model_id.lower()
+            # Filter out homepage/generic URLs that waste time
+            urls = [u for u in urls if _is_useful_url(u, model_id)]
             for url in urls:
+                domain = (_urlparse(url).hostname or "").removeprefix("www.")
                 try:
-                    scraped = await scrape_page(
-                        browser, url, model_id, locale=locale,
-                    )
-                    relevant = [
-                        p for p in scraped
-                        if mid_lower in p.name.lower()
-                        or (p.model_id and mid_lower in p.model_id.lower())
-                    ]
-                    for p in relevant:
-                        p.product_type = model_id
-                    products.extend(relevant)
+                    with operation_span(
+                        _tracer, f"scrape_site:{domain}",
+                        input=json.dumps({"url": url, "model_id": model_id}),
+                    ) as site_op:
+                        scraped = await scrape_page(
+                            browser, url, model_id, locale=locale,
+                        )
+                        # Filter to products matching the target model ID.
+                        # For product-detail pages (few results) where the
+                        # URL itself contains the model ID, trust the URL as
+                        # a relevance signal (Hebrew product names won't
+                        # contain the alphanumeric model ID).
+                        url_has_mid = mid_lower in url.lower()
+                        is_detail_page = len(scraped) <= 5
+                        relevant: list[ProductResult] = []
+                        filtered_out: list[dict] = []
+                        for p in scraped:
+                            name_match = mid_lower in p.name.lower()
+                            mid_match = p.model_id and mid_lower in p.model_id.lower()
+                            seller_url_match = any(
+                                mid_lower in (s.url or "").lower()
+                                for s in (p.sellers or [])
+                            )
+                            url_match = url_has_mid and is_detail_page
+                            if name_match or mid_match or seller_url_match or url_match:
+                                p.product_type = model_id
+                                relevant.append(p)
+                            else:
+                                filtered_out.append({
+                                    "name": p.name[:100],
+                                    "model_id": p.model_id,
+                                    "reason": "model_id_mismatch",
+                                })
+
+                        # On detail pages with URL match, keep only the main
+                        # product (highest price) to filter out upsells like
+                        # warranties and installation add-ons.
+                        if url_has_mid and is_detail_page and len(relevant) > 1:
+                            def _main_price(p: ProductResult) -> float:
+                                for s in p.sellers or []:
+                                    if s.price is not None:
+                                        return s.price
+                                return 0.0
+
+                            relevant.sort(key=_main_price, reverse=True)
+                            upsells = relevant[1:]
+                            relevant = relevant[:1]
+                            for p in upsells:
+                                filtered_out.append({
+                                    "name": p.name[:100],
+                                    "model_id": p.model_id,
+                                    "reason": "upsell_addon",
+                                })
+
+                        products.extend(relevant)
+
+                        site_op.set_attribute("output", json.dumps({
+                            "url": url,
+                            "model_id": model_id,
+                            "scraped_count": len(scraped),
+                            "relevant_count": len(relevant),
+                            "filtered_count": len(filtered_out),
+                            "relevant_products": [
+                                {
+                                    "name": p.name[:100],
+                                    "model_id": p.model_id,
+                                    "price": p.sellers[0].price if p.sellers else None,
+                                    "currency": p.sellers[0].currency if p.sellers else None,
+                                    "seller_count": len(p.sellers),
+                                }
+                                for p in relevant
+                            ],
+                            "filtered_products": filtered_out[:10],
+                        }, ensure_ascii=False))
                 except Exception:
                     logger.warning("Failed to scrape %s for model %s", url, model_id)
                     continue
@@ -513,30 +624,52 @@ class MainAgent:
             async def search_single_model(model_id: str) -> list[str]:
                 """Return a list of URLs to scrape for a given model ID."""
                 await self._add_status(f"Searching for {model_id}...")
-                results = await search_products(model_id, language, market)
-                ecom_data = [
-                    {"url": r.url, "title": r.title, "snippet": r.snippet}
-                    for r in results
-                ]
-                ecom_signals = identify_ecommerce_sites(ecom_data)
+                with operation_span(
+                    _tracer, f"search_model:{model_id}",
+                    input=json.dumps({"model_id": model_id, "market": market}),
+                ) as model_op:
+                    results = await search_products(model_id, language, market)
+                    ecom_data = [
+                        {"url": r.url, "title": r.title, "snippet": r.snippet}
+                        for r in results
+                    ]
+                    ecom_signals = identify_ecommerce_sites(ecom_data, market=market)
 
-                urls = [s.url for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]]
+                    urls = [s.url for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]]
 
-                # Add aggregator direct URLs from DB (filtered by market + category)
-                aggregator_entries = await get_aggregator_urls(model_id, market, category)
-                seen_domains = {s.domain for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]}
-                for entry in aggregator_entries:
-                    if entry["domain"] not in seen_domains:
-                        urls.append(entry["url"])
-                        seen_domains.add(entry["domain"])
+                    # Add aggregator direct URLs from DB (filtered by market + category)
+                    aggregator_entries = await get_aggregator_urls(model_id, market, category)
+                    seen_domains = {s.domain for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]}
+                    for entry in aggregator_entries:
+                        if entry["domain"] not in seen_domains:
+                            urls.append(entry["url"])
+                            seen_domains.add(entry["domain"])
 
-                return urls
+                    model_op.set_attribute("output", json.dumps({
+                        "model_id": model_id,
+                        "search_result_count": len(results),
+                        "ecommerce_sites": [
+                            {"domain": s.domain, "url": s.url, "confidence": s.confidence,
+                             "signals": s.signals}
+                            for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]
+                        ],
+                        "aggregator_urls": [e["domain"] for e in aggregator_entries],
+                        "total_urls_to_scrape": len(urls),
+                    }, ensure_ascii=False))
+
+                    return urls
 
             # Discover new aggregators for this market+category (async, non-blocking)
             if category:
                 asyncio.ensure_future(discover_aggregators(market, category))
 
-            search_tasks = [search_single_model(mid) for mid in model_ids]
+            # Stagger searches to avoid rate-limiting by DuckDuckGo
+            async def _staggered_search(idx: int, mid: str) -> list[str]:
+                if idx > 0:
+                    await asyncio.sleep(idx * 2.5)
+                return await search_single_model(mid)
+
+            search_tasks = [_staggered_search(i, mid) for i, mid in enumerate(model_ids)]
             urls_per_model = await asyncio.gather(*search_tasks, return_exceptions=True)
             search_op.set_attribute("output", json.dumps({
                 "models_searched": len(model_ids),
