@@ -15,7 +15,7 @@ from src.backend.db.models import ScrapingInstruction, SearchHistory, ShoppingLi
 from src.backend.websocket.handler import send_status
 from src.shared.geo import detect_market, get_client_ip
 from src.shared.logging import set_session_id
-from src.shared.market_config import get_lang_to_market_map
+from src.shared.market_config import detect_market_from_query, get_lang_to_market_map
 from src.shared.models import (
     AddToShoppingListRequest,
     CrossSeller,
@@ -42,10 +42,12 @@ async def search(request: SearchRequest, raw_request: Request) -> SearchResponse
     session_id = request.session_id or uuid.uuid4().hex
     set_session_id(session_id)
 
-    # Derive market: explicit > GeoIP > language-based > config default
+    # Derive market: explicit > query text > GeoIP > language-based > config default
     # Language-to-market only maps languages strongly tied to one country.
     # English is excluded — it's spoken globally and not a location signal.
     market = request.market
+    if not market:
+        market = detect_market_from_query(request.query)
     if not market:
         client_ip = get_client_ip(raw_request)
         market = detect_market(client_ip)
@@ -199,6 +201,7 @@ async def get_search_results(session_id: str) -> SearchResponse:
     return SearchResponse(
         session_id=record.session_id,
         status=SearchStatus(record.status),
+        query=record.query or "",
         results=results,
         cross_sellers=cross_sellers,
         status_message="",

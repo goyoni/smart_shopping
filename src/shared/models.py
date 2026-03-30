@@ -89,6 +89,7 @@ class SearchRequest(BaseModel):
 class SearchResponse(BaseModel):
     session_id: str
     status: SearchStatus
+    query: str = ""
     results: list[ProductResult] = Field(default_factory=list)
     cross_sellers: list[CrossSeller] = Field(default_factory=list)
     status_message: str = ""
