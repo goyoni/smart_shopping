@@ -182,13 +182,13 @@ def _init_tracer_provider() -> None:
     # Always add session ID processor first
     provider.add_span_processor(SessionIdSpanProcessor())
 
-    # Determine OTLP endpoint
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or getattr(
-        settings, "otel_exporter_endpoint", ""
-    )
-
-    if not endpoint and settings.phoenix_enabled:
+    # Determine OTLP endpoint — local Phoenix takes priority when enabled
+    if settings.phoenix_enabled:
         endpoint = f"http://localhost:{settings.phoenix_port}/v1/traces"
+    else:
+        endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or getattr(
+            settings, "otel_exporter_endpoint", ""
+        )
 
     if endpoint:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
