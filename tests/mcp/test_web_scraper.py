@@ -9,6 +9,8 @@ import pytest
 from src.mcp_servers.web_scraper_mcp.scraper import (
     _extract_from_data_attrs,
     _extract_jsonld_from_soup,
+    _extract_microdata_from_soup,
+    _extract_og_product_from_soup,
     _extract_page_product_name,
     _find_next_page_url,
     _is_safe_url,
@@ -47,6 +49,16 @@ class TestParsePrice:
 
     def test_thousands_comma(self):
         assert parse_price("1,299") == 1299.0
+
+    def test_rejects_insane_price(self):
+        # Concatenated digits from multiple price elements
+        assert parse_price("25802480") is None
+
+    def test_accepts_high_but_sane_price(self):
+        assert parse_price("999,999") == 999999.0
+
+    def test_rejects_above_million(self):
+        assert parse_price("1,500,000") is None
 
 
 class TestExtractDomain:
@@ -884,3 +896,133 @@ class TestExtractJsonldFromSoup:
         """
         soup = BeautifulSoup(html, "html.parser")
         assert _extract_jsonld_from_soup(soup, "https://x.com", "x.com") is None
+
+
+class TestExtractMicrodataFromSoup:
+    def test_extracts_product_from_microdata(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <meta property="og:image" content="https://img.example.com/prod.jpg"/>
+        </head><body>
+        <h1 itemprop="name">Bosch SMV4ECX28E Dishwasher</h1>
+        <span itemprop="brand" content="Bosch">Bosch</span>
+        <meta itemprop="price" content="4155"/>
+        <meta itemprop="priceCurrency" content="ILS"/>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = _extract_microdata_from_soup(soup, "https://shop.example.com/p/123", "shop.example.com")
+        assert result is not None
+        assert result.name == "Bosch SMV4ECX28E Dishwasher"
+        assert result.model_id == "SMV4ECX28E"
+        assert result.brand == "Bosch"
+        assert result.sellers[0].price == 4155
+        assert result.sellers[0].currency == "ILS"
+        assert result.image_url == "https://img.example.com/prod.jpg"
+
+    def test_extracts_price_from_text_content(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><body>
+        <h1 itemprop="name">Widget Pro 2000</h1>
+        <span itemprop="price">₪2,990</span>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+                   return_value="ILS"):
+            result = _extract_microdata_from_soup(soup, "https://x.com/p", "x.com")
+        assert result is not None
+        assert result.sellers[0].price == 2990
+
+    def test_returns_none_without_price(self):
+        from bs4 import BeautifulSoup
+        html = '<html><body><h1 itemprop="name">Test</h1></body></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_microdata_from_soup(soup, "https://x.com", "x.com") is None
+
+    def test_returns_none_for_zero_price(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><body>
+        <h1 itemprop="name">Widget</h1>
+        <meta itemprop="price" content="0"/>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_microdata_from_soup(soup, "https://x.com", "x.com") is None
+
+    def test_falls_back_to_h1_for_name(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><body>
+        <h1>Samsung RM70F63REB Fridge</h1>
+        <meta itemprop="price" content="8500"/>
+        <meta itemprop="priceCurrency" content="ILS"/>
+        </body></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = _extract_microdata_from_soup(soup, "https://x.com/p", "x.com")
+        assert result is not None
+        assert result.model_id == "RM70F63REB"
+
+
+class TestExtractOgProductFromSoup:
+    def test_extracts_product_from_og_meta(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <meta property="og:type" content="product"/>
+        <meta property="og:title" content="Bosch HBG578EB3 Built-in Oven"/>
+        <meta property="og:image" content="https://img.example.com/oven.jpg"/>
+        <meta property="product:price:amount" content="3128"/>
+        <meta property="product:price:currency" content="ILS"/>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        result = _extract_og_product_from_soup(soup, "https://shop.example.com/oven", "shop.example.com")
+        assert result is not None
+        assert result.name == "Bosch HBG578EB3 Built-in Oven"
+        assert result.model_id == "HBG578EB3"
+        assert result.sellers[0].price == 3128
+        assert result.sellers[0].currency == "ILS"
+        assert result.image_url == "https://img.example.com/oven.jpg"
+
+    def test_returns_none_without_og_type_product(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <meta property="og:type" content="website"/>
+        <meta property="product:price:amount" content="100"/>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_og_product_from_soup(soup, "https://x.com", "x.com") is None
+
+    def test_returns_none_without_price(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <meta property="og:type" content="product"/>
+        <meta property="og:title" content="Test Product"/>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        assert _extract_og_product_from_soup(soup, "https://x.com", "x.com") is None
+
+    def test_uses_domain_currency_fallback(self):
+        from bs4 import BeautifulSoup
+        html = """
+        <html><head>
+        <meta property="og:type" content="product"/>
+        <meta property="og:title" content="Bosch PVS631HC1E Cooktop"/>
+        <meta property="product:price:amount" content="1982"/>
+        </head></html>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        with patch("src.mcp_servers.web_scraper_mcp.scraper.get_default_currency_for_domain",
+                   return_value="ILS"):
+            result = _extract_og_product_from_soup(soup, "https://x.co.il/p", "x.co.il")
+        assert result is not None
+        assert result.sellers[0].currency == "ILS"

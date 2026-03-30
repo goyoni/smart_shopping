@@ -116,6 +116,9 @@ def extract_domain(url: str) -> str:
     return domain
 
 
+_MAX_SANE_PRICE = 1_000_000  # reject prices above $1M as extraction errors
+
+
 def parse_price(text: str) -> float | None:
     """Extract numeric price from text containing currency symbols."""
     if not text:
@@ -142,9 +145,12 @@ def parse_price(text: str) -> float | None:
             # Likely thousands: 1,299
             cleaned = cleaned.replace(",", "")
     try:
-        return float(cleaned)
+        value = float(cleaned)
     except ValueError:
         return None
+    if value > _MAX_SANE_PRICE:
+        return None
+    return value
 
 
 def _detect_page_type(url: str) -> str:
@@ -272,6 +278,18 @@ async def _try_http_prefetch(
         logger.info("HTTP pre-fetch extracted product from %s (JSON-LD)", domain)
         return [product]
 
+    # Try microdata (itemprop) extraction
+    product = _extract_microdata_from_soup(soup, url, domain)
+    if product:
+        logger.info("HTTP pre-fetch extracted product from %s (microdata)", domain)
+        return [product]
+
+    # Try OG meta tags (og:type=product + product:price:amount)
+    product = _extract_og_product_from_soup(soup, url, domain)
+    if product:
+        logger.info("HTTP pre-fetch extracted product from %s (og:meta)", domain)
+        return [product]
+
     return None
 
 
@@ -343,10 +361,7 @@ def _extract_from_data_attrs(
 
     # Try to extract model from page URL or name
     if page_product_name:
-        # Look for alphanumeric model ID patterns in the name
-        model_match = re.search(r'\b([A-Z]{2,}[\d]{3,}[A-Z\d]*)\b', page_product_name)
-        if model_match:
-            model_id = model_match.group(1)
+        model_id = _extract_model_from_text(page_product_name)
 
     if not model_id:
         key = page_product_name.lower().strip()
@@ -434,6 +449,134 @@ def _extract_jsonld_from_soup(
     return None
 
 
+def _extract_model_from_text(text: str) -> str | None:
+    """Try to find an alphanumeric model ID pattern in text.
+
+    Matches patterns like SMV4ECX28E, BFL523MB1F, SM-S921B —
+    starts with 2+ uppercase letters, contains at least one digit,
+    and is 5+ characters long.
+    """
+    match = re.search(r'\b([A-Z]{2,}(?=[A-Z\d-]*\d)[A-Z\d-]{3,}[A-Z\d])\b', text)
+    return match.group(1) if match else None
+
+
+def _extract_microdata_from_soup(
+    soup: BeautifulSoup,
+    page_url: str,
+    domain: str,
+) -> ProductResult | None:
+    """Extract a product from HTML microdata (itemprop attributes)."""
+    price_el = soup.find(attrs={"itemprop": "price"})
+    if not price_el:
+        return None
+
+    price_raw = price_el.get("content") or price_el.get_text(strip=True)
+    price = parse_price(price_raw)
+    if price is None or price <= 0:
+        return None
+
+    currency_el = soup.find(attrs={"itemprop": "priceCurrency"})
+    currency = ""
+    if currency_el:
+        currency = currency_el.get("content") or currency_el.get_text(strip=True)
+    if not currency:
+        currency = get_default_currency_for_domain(domain)
+
+    # Product name — from itemprop="name" scoped under Product, or h1/og:title
+    name = ""
+    name_el = soup.find(attrs={"itemprop": "name"})
+    if name_el:
+        name = name_el.get("content") or name_el.get_text(strip=True)
+    if not name or len(name) < 3:
+        name = _extract_page_product_name(soup)
+    if not name or len(name) < 3:
+        return None
+
+    model_id = None
+    sku_el = soup.find(attrs={"itemprop": "sku"})
+    if sku_el:
+        sku_val = (sku_el.get("content") or sku_el.get_text(strip=True)).strip()
+        if sku_val:
+            model_id = sku_val
+    if not model_id:
+        mpn_el = soup.find(attrs={"itemprop": "mpn"})
+        if mpn_el:
+            mpn_val = (mpn_el.get("content") or mpn_el.get_text(strip=True)).strip()
+            if mpn_val:
+                model_id = mpn_val
+    if not model_id:
+        model_id = _extract_model_from_text(name)
+    if not model_id:
+        model_id = hashlib.md5(name.lower().encode()).hexdigest()[:12]
+
+    brand = None
+    brand_el = soup.find(attrs={"itemprop": "brand"})
+    if brand_el:
+        # Brand can be nested (itemprop="name" inside itemprop="brand")
+        inner = brand_el.find(attrs={"itemprop": "name"})
+        brand = (inner or brand_el).get("content") or (inner or brand_el).get_text(strip=True)
+
+    image_url = None
+    og_img = soup.find("meta", property="og:image")
+    if og_img and og_img.get("content"):
+        image_url = og_img["content"]
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        brand=brand,
+        image_url=image_url,
+        sellers=[Seller(name=domain, price=price, currency=currency, url=page_url)],
+    )
+
+
+def _extract_og_product_from_soup(
+    soup: BeautifulSoup,
+    page_url: str,
+    domain: str,
+) -> ProductResult | None:
+    """Extract a product from OpenGraph product meta tags."""
+    og_type = soup.find("meta", property="og:type")
+    if not og_type or og_type.get("content", "").lower() != "product":
+        return None
+
+    price_meta = soup.find("meta", property="product:price:amount")
+    if not price_meta:
+        return None
+
+    price = parse_price(price_meta.get("content", ""))
+    if price is None or price <= 0:
+        return None
+
+    currency_meta = soup.find("meta", property="product:price:currency")
+    currency = currency_meta.get("content", "") if currency_meta else ""
+    if not currency:
+        currency = get_default_currency_for_domain(domain)
+
+    og_title = soup.find("meta", property="og:title")
+    name = og_title.get("content", "").strip() if og_title else ""
+    if not name or len(name) < 3:
+        name = _extract_page_product_name(soup)
+    if not name or len(name) < 3:
+        return None
+
+    model_id = _extract_model_from_text(name)
+    if not model_id:
+        model_id = hashlib.md5(name.lower().encode()).hexdigest()[:12]
+
+    image_url = None
+    og_img = soup.find("meta", property="og:image")
+    if og_img and og_img.get("content"):
+        image_url = og_img["content"]
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        image_url=image_url,
+        sellers=[Seller(name=domain, price=price, currency=currency, url=page_url)],
+    )
+
+
 async def scrape_page(
     browser: Browser,
     url: str,
@@ -502,6 +645,19 @@ async def scrape_page(
         except Exception:
             logger.warning("Failed to navigate to %s", url)
             return []
+
+        # Detect and wait for JS challenge pages (e.g. Cloudflare "Just a moment...")
+        try:
+            title = await page.title()
+            if "just a moment" in title.lower():
+                logger.info("JS challenge detected on %s, waiting for resolution", domain)
+                await page.wait_for_function(
+                    "document.title.toLowerCase().indexOf('just a moment') === -1",
+                    timeout=15000,
+                )
+                await page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass  # Continue even if challenge doesn't resolve
 
         # Wait for content — first networkidle, then look for price indicators
         try:
@@ -1188,6 +1344,41 @@ async def _extract_jsonld_product(
                     }
                 } catch {}
             }
+            // Fallback: microdata (itemprop attributes)
+            const priceEl = document.querySelector('[itemprop="price"]');
+            if (priceEl) {
+                const rawPrice = priceEl.getAttribute('content') || priceEl.textContent || '';
+                const parsedPrice = parseFloat(rawPrice.replace(/[^0-9.]/g, ''));
+                if (parsedPrice > 0 && parsedPrice < 1000000) {
+                    const currEl = document.querySelector('[itemprop="priceCurrency"]');
+                    const nameEl = document.querySelector('[itemprop="name"]');
+                    const brandEl = document.querySelector('[itemprop="brand"]');
+                    const skuEl = document.querySelector('[itemprop="sku"]');
+                    const mpnEl = document.querySelector('[itemprop="mpn"]');
+                    let brandName = '';
+                    if (brandEl) {
+                        const inner = brandEl.querySelector('[itemprop="name"]');
+                        brandName = (inner || brandEl).getAttribute('content')
+                                 || (inner || brandEl).textContent || '';
+                    }
+                    const getName = (sel) => {
+                        const el = document.querySelector(sel);
+                        return el ? el.getAttribute('content') || '' : '';
+                    };
+                    return {
+                        name: (nameEl ? (nameEl.getAttribute('content') || nameEl.textContent) : '')
+                              || getName('meta[property="og:title"]')
+                              || (document.querySelector('h1') || {}).textContent || '',
+                        brand: brandName.trim(),
+                        price: parsedPrice,
+                        currency: (currEl ? (currEl.getAttribute('content') || currEl.textContent) : '').trim(),
+                        image: getName('meta[property="og:image"]'),
+                        mpn: (skuEl ? (skuEl.getAttribute('content') || skuEl.textContent) : '').trim()
+                           || (mpnEl ? (mpnEl.getAttribute('content') || mpnEl.textContent) : '').trim(),
+                    };
+                }
+            }
+
             // Fallback: OG meta tags + DOM price extraction
             const getName = (sel) => {
                 const el = document.querySelector(sel);
@@ -1198,23 +1389,48 @@ async def _extract_jsonld_product(
             // Try to extract price from rendered DOM
             let domPrice = null;
             let domCurrency = '';
-            const pricePattern = /[$₪€£]\s*([\d,]+(?:\.\d{1,2})?)|(\d[\d,]*(?:\.\d{1,2})?)\s*[$₪€£]/;
+            const pricePattern = /[$₪€£]\\s*([\\d,]+(?:\\.?\\d{1,2})?)|(\\d[\\d,]*(?:\\.?\\d{1,2})?)\\s*[$₪€£]/;
             const priceSelectors = [
-                '[class*="price"]', '[class*="Price"]',
-                '[data-price]', 'span[class*="amount"]',
+                '[class*="price"][class*="current"]',
+                '[class*="price"][class*="final"]',
+                '[class*="price"][class*="sale"]',
+                '[data-price]', '[data-product-price]',
                 '[class*="product-price"]', '[class*="ProductPrice"]',
+                '[class*="price"]', '[class*="Price"]',
+                'span[class*="amount"]',
             ];
+            const excludePatterns = /old|was|original|before|regular|compare|discount|save|shipping|delivery|installment|payment|monthly/i;
             for (const sel of priceSelectors) {
                 const els = document.querySelectorAll(sel);
                 for (const el of els) {
+                    // Skip elements whose class/id suggests old/shipping price
+                    const cls = (el.className || '') + ' ' + (el.id || '');
+                    if (excludePatterns.test(cls)) continue;
+                    // Also check parent
+                    const parentCls = (el.parentElement?.className || '') + ' ' + (el.parentElement?.id || '');
+                    if (excludePatterns.test(parentCls)) continue;
+
+                    // Try data attribute first
+                    const dataPrice = el.getAttribute('data-price') || el.getAttribute('data-product-price');
+                    if (dataPrice) {
+                        const dp = parseFloat(dataPrice);
+                        if (dp > 0 && dp < 1000000) {
+                            domPrice = dp;
+                            break;
+                        }
+                    }
+
                     const text = (el.textContent || '').trim();
                     const m = text.match(pricePattern);
                     if (m) {
-                        domPrice = parseFloat((m[1] || m[2]).replace(/,/g, ''));
-                        if (text.includes('₪')) domCurrency = 'ILS';
-                        else if (text.includes('$')) domCurrency = 'USD';
-                        else if (text.includes('€')) domCurrency = 'EUR';
-                        break;
+                        const p = parseFloat((m[1] || m[2]).replace(/,/g, ''));
+                        if (p > 0 && p < 1000000) {
+                            domPrice = p;
+                            if (text.includes('₪')) domCurrency = 'ILS';
+                            else if (text.includes('$')) domCurrency = 'USD';
+                            else if (text.includes('€')) domCurrency = 'EUR';
+                            break;
+                        }
                     }
                 }
                 if (domPrice) break;
@@ -1256,15 +1472,21 @@ async def _extract_jsonld_product(
 
     model_id = data.get("mpn") or None
     if not model_id:
+        model_id = _extract_model_from_text(name)
+    if not model_id:
         key = f"{data.get('brand', '')}{name}".lower().strip()
         model_id = hashlib.md5(key.encode()).hexdigest()[:12]
+
+    # Apply sanity cap to prices from DOM extraction
+    if price is not None and price > _MAX_SANE_PRICE:
+        price = None
 
     return ProductResult(
         name=name,
         model_id=model_id,
         brand=data.get("brand") or None,
         image_url=data.get("image") or None,
-        sellers=[seller],
+        sellers=[Seller(name=domain, price=price, currency=currency, url=url)],
     )
 
 
