@@ -496,6 +496,7 @@ async def _attempt_playwright(
                     if strategy:
                         strategy.access_method = "playwright"
                         strategy.extraction_method = "css_strategy"
+                        strategy.last_successful_url = url
                         await save_strategy(domain, strategy, page_type)
                 elif winning_method == "api_intercept":
                     api_strategy = ScrapingStrategy(
@@ -503,6 +504,7 @@ async def _attempt_playwright(
                         discovery_method="api_intercept",
                         access_method="playwright",
                         extraction_method="api_intercept",
+                        last_successful_url=url,
                     )
                     await save_strategy(domain, api_strategy, page_type)
 

@@ -330,10 +330,10 @@ async def search_products(
             span.set_attribute("translated_query", translated)
             span.set_attribute("search_mode", "dual")
 
-            # Run both searches concurrently
-            primary_task = _run_single_search(url, query, _max_attempts=_max_attempts)
-            local_task = _run_single_search(local_url, translated, _max_attempts=_max_attempts)
-            primary_results, local_results = await asyncio.gather(primary_task, local_task)
+            # Run searches sequentially to avoid DuckDuckGo rate-limiting
+            primary_results = await _run_single_search(url, query, _max_attempts=_max_attempts)
+            await asyncio.sleep(1.0)
+            local_results = await _run_single_search(local_url, translated, _max_attempts=_max_attempts)
 
             # Merge: local results first (deduped by URL)
             seen_urls: set[str] = set()
