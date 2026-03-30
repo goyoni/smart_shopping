@@ -97,11 +97,12 @@ export default function Home() {
     setResults([]);
     setCrossSellers([]);
 
-    const sessionId = sessionIdRef.current;
+    // Always generate a fresh session ID for each new search
+    const sessionId = crypto.randomUUID().replace(/-/g, "");
+    sessionIdRef.current = sessionId;
 
-    // Update URL with search params
-    const params = new URLSearchParams({ q: searchQuery, session_id: sessionId });
-    window.history.pushState({}, "", `?${params.toString()}`);
+    // Update URL with session ID only (never store query to avoid re-triggering on refresh)
+    window.history.pushState({}, "", `?session_id=${sessionId}`);
 
     // Connect WebSocket before sending search request
     wsRef.current?.disconnect();
@@ -144,30 +145,31 @@ export default function Home() {
   const handleHistoryClick = useCallback(async (entry: HistoryEntry) => {
     sessionIdRef.current = entry.session_id;
     setQuery(entry.query);
+    setLoading(false);
+    setStatusMessages([]);
+    setResults([]);
+    setCrossSellers([]);
 
-    // Update URL with search params
-    const params = new URLSearchParams({ q: entry.query, session_id: entry.session_id });
-    window.history.pushState({}, "", `?${params.toString()}`);
+    // Update URL with session ID only
+    window.history.pushState({}, "", `?session_id=${entry.session_id}`);
 
-    if (entry.status === "completed" && entry.result_count > 0) {
-      try {
-        const res = await fetch(`${apiBase}/api/search/${entry.session_id}`);
-        if (res.ok) {
-          const data = await res.json();
-          setResults(data.results || []);
-          setCrossSellers(data.cross_sellers || []);
-          setStatusMessages([`Loaded ${(data.results || []).length} saved results`]);
-          return;
-        }
-      } catch {
-        // Fall through to re-run search
+    // Only load saved results — never trigger a new search
+    try {
+      const res = await fetch(`${apiBase}/api/search/${entry.session_id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setResults(data.results || []);
+        setCrossSellers(data.cross_sellers || []);
+        setStatusMessages([`Loaded ${(data.results || []).length} saved results`]);
+      } else {
+        setStatusMessages(["No saved results found for this search"]);
       }
+    } catch {
+      setStatusMessages(["Failed to load saved results"]);
     }
+  }, [apiBase]);
 
-    runSearch(entry.query);
-  }, [apiBase, runSearch]);
-
-  // Restore search from URL params on mount + fetch history
+  // Restore saved results from session_id on mount (never re-run search)
   useEffect(() => {
     if (didRestoreRef.current) return;
     didRestoreRef.current = true;
@@ -175,12 +177,27 @@ export default function Home() {
     fetchHistory();
 
     const params = new URLSearchParams(window.location.search);
-    const urlQuery = params.get("q");
-    if (urlQuery) {
-      setQuery(urlQuery);
-      runSearch(urlQuery);
+    const urlSessionId = params.get("session_id");
+    if (urlSessionId) {
+      sessionIdRef.current = urlSessionId;
+      (async () => {
+        try {
+          const res = await fetch(`${apiBase}/api/search/${urlSessionId}`);
+          if (res.ok) {
+            const data = await res.json();
+            if ((data.results || []).length > 0) {
+              setQuery(data.query || "");
+              setResults(data.results || []);
+              setCrossSellers(data.cross_sellers || []);
+              setStatusMessages([`Loaded ${(data.results || []).length} saved results`]);
+            }
+          }
+        } catch {
+          // Failed to load — user can manually search again
+        }
+      })();
     }
-  }, [runSearch, fetchHistory]);
+  }, [fetchHistory, apiBase]);
 
   useEffect(() => {
     return () => {
