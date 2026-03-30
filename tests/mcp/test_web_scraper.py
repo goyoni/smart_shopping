@@ -718,7 +718,8 @@ class TestHttpPrefetch:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_returns_none_on_http_error(self):
+    async def test_returns_none_on_both_http_clients_error(self):
+        """When both httpx and curl_cffi fail, returns None."""
         mock_resp = MagicMock()
         mock_resp.status_code = 403
         mock_client = AsyncMock()
@@ -726,12 +727,62 @@ class TestHttpPrefetch:
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                   return_value=mock_client):
+        mock_cf_resp = MagicMock()
+        mock_cf_resp.status_code = 403
+        mock_cf_session = AsyncMock()
+        mock_cf_session.get.return_value = mock_cf_resp
+        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
+        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                  return_value=mock_client),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
+                  return_value=mock_cf_session),
+        ):
             result = await _try_http_prefetch(
                 "https://example.com/product", "test", "example.com",
             )
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_curl_cffi_fallback_on_httpx_failure(self):
+        """When httpx returns 403 but curl_cffi succeeds, uses curl_cffi response."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_client = AsyncMock()
+        mock_client.get.return_value = mock_resp
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        microdata_html = """<html><body>
+        <div itemscope itemtype="https://schema.org/Product">
+            <h1 itemprop="name">Bosch SMV4ECX28E</h1>
+            <span itemprop="price" content="3999">₪3,999</span>
+            <meta itemprop="priceCurrency" content="ILS"/>
+        </div>
+        </body></html>""" + " " * 1000  # pad to exceed min length
+
+        mock_cf_resp = MagicMock()
+        mock_cf_resp.status_code = 200
+        mock_cf_resp.text = microdata_html
+        mock_cf_session = AsyncMock()
+        mock_cf_session.get.return_value = mock_cf_resp
+        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
+        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                  return_value=mock_client),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
+                  return_value=mock_cf_session),
+        ):
+            result = await _try_http_prefetch(
+                "https://shop.example.com/product/123", "SMV4ECX28E", "shop.example.com",
+            )
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].name == "Bosch SMV4ECX28E"
 
     @pytest.mark.asyncio
     async def test_returns_none_for_small_html(self):
@@ -752,13 +803,23 @@ class TestHttpPrefetch:
 
     @pytest.mark.asyncio
     async def test_returns_none_on_network_error(self):
+        """When both httpx and curl_cffi throw network errors, returns None."""
         mock_client = AsyncMock()
         mock_client.get.side_effect = Exception("Connection refused")
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
-                   return_value=mock_client):
+        mock_cf_session = AsyncMock()
+        mock_cf_session.get.side_effect = Exception("Connection refused")
+        mock_cf_session.__aenter__ = AsyncMock(return_value=mock_cf_session)
+        mock_cf_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.scraper.httpx.AsyncClient",
+                  return_value=mock_client),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.CurlSession",
+                  return_value=mock_cf_session),
+        ):
             result = await _try_http_prefetch(
                 "https://example.com/product", "test", "example.com",
             )

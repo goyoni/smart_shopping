@@ -271,6 +271,37 @@ def get_criteria_catalog() -> dict[str, dict[str, dict]]:
     return _load_criteria_catalog()
 
 
+def get_browser_timezone(market: str) -> str:
+    """Return the IANA timezone for a market (e.g. 'il' -> 'Asia/Jerusalem')."""
+    try:
+        return _load_market(market).get("timezone", "UTC")
+    except (FileNotFoundError, KeyError):
+        return "UTC"
+
+
+def get_browser_geolocation(market: str) -> dict[str, float] | None:
+    """Return geolocation dict with latitude/longitude for a market."""
+    try:
+        return _load_market(market).get("geolocation")
+    except (FileNotFoundError, KeyError):
+        return None
+
+
+def get_browser_languages(market: str) -> list[str]:
+    """Return preferred browser language list for a market."""
+    try:
+        langs = _load_market(market).get("browser_languages")
+        if langs:
+            return langs
+    except (FileNotFoundError, KeyError):
+        pass
+    # Derive from market language + locale
+    lang = get_market_language(market)
+    if lang:
+        return [f"{lang}-{market.upper()}", lang, "en-US", "en"]
+    return ["en-US", "en"]
+
+
 # ---------------------------------------------------------------------------
 # Default aggregators (for DB seeding)
 # ---------------------------------------------------------------------------

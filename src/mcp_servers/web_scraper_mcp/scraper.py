@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from curl_cffi.requests import AsyncSession as CurlSession
 from playwright.async_api import Browser, Response
 
 from src.mcp_servers.web_scraper_mcp.db_cache import (
@@ -242,6 +243,10 @@ async def _try_http_prefetch(
     """
     if not _is_safe_url(url):
         return None
+
+    html: str | None = None
+
+    # Try plain httpx first (fastest, works for most server-rendered sites).
     try:
         async with httpx.AsyncClient(
             headers=_HTTP_HEADERS,
@@ -249,12 +254,30 @@ async def _try_http_prefetch(
             timeout=_HTTP_TIMEOUT,
         ) as client:
             resp = await client.get(url)
-            if resp.status_code != 200:
-                return None
+            if resp.status_code == 200:
+                html = resp.text
     except Exception:
-        return None
+        pass
 
-    html = resp.text
+    # Fall back to curl_cffi with browser TLS impersonation.
+    # This bypasses some Cloudflare JS challenges that block plain httpx.
+    if html is None:
+        try:
+            async with CurlSession() as session:
+                resp_cf = await session.get(
+                    url,
+                    impersonate="chrome120",
+                    headers=_HTTP_HEADERS,
+                    timeout=_HTTP_TIMEOUT,
+                    allow_redirects=True,
+                )
+                if resp_cf.status_code == 200:
+                    html = resp_cf.text
+        except Exception:
+            pass
+
+    if html is None:
+        return None
     if len(html) < 1000:
         return None
 
@@ -649,13 +672,17 @@ async def scrape_page(
         # Detect and wait for JS challenge pages (e.g. Cloudflare "Just a moment...")
         try:
             title = await page.title()
-            if "just a moment" in title.lower():
+            title_lower = title.lower()
+            if "just a moment" in title_lower:
                 logger.info("JS challenge detected on %s, waiting for resolution", domain)
                 await page.wait_for_function(
                     "document.title.toLowerCase().indexOf('just a moment') === -1",
                     timeout=15000,
                 )
                 await page.wait_for_load_state("networkidle", timeout=10000)
+            elif "attention required" in title_lower:
+                logger.warning("Cloudflare CAPTCHA block on %s — cannot bypass", domain)
+                return []
         except Exception:
             pass  # Continue even if challenge doesn't resolve
 

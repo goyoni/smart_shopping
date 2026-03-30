@@ -9,6 +9,9 @@
   },
   "google_domain": "google.co.il",
   "region_code": "il-he",
+  "timezone": "Asia/Jerusalem",
+  "geolocation": {"latitude": 32.0853, "longitude": 34.7818},
+  "browser_languages": ["he-IL", "he", "en-US", "en"],
   "buy_online_suffix": "\u05e7\u05e0\u05d9\u05d9\u05d4 \u05d0\u05d5\u05e0\u05dc\u05d9\u05d9\u05df",
   "marketplace_domains": {},
   "aggregators": [

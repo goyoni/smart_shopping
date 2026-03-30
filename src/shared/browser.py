@@ -9,6 +9,11 @@ from playwright.async_api import Browser, Page, async_playwright
 
 from src.shared.config import settings
 from src.shared.logging import get_logger
+from src.shared.market_config import (
+    get_browser_geolocation,
+    get_browser_languages,
+    get_browser_timezone,
+)
 
 logger = get_logger(__name__)
 
@@ -24,17 +29,25 @@ async def get_browser() -> AsyncIterator[Browser]:
     try:
         browser = await pw.chromium.launch(
             headless=settings.playwright_headless,
-            args=["--no-sandbox"],
+            channel="chrome",
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
-    except Exception as exc:
-        logger.warning("Chromium launch failed (%s), falling back to Firefox", exc)
+    except Exception:
+        # channel="chrome" requires Chrome installed; fall back to bundled Chromium
         try:
-            browser = await pw.firefox.launch(
+            browser = await pw.chromium.launch(
                 headless=settings.playwright_headless,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
-        except Exception as exc2:
-            await pw.stop()
-            raise RuntimeError("No browser could be launched") from exc2
+        except Exception as exc:
+            logger.warning("Chromium launch failed (%s), falling back to Firefox", exc)
+            try:
+                browser = await pw.firefox.launch(
+                    headless=settings.playwright_headless,
+                )
+            except Exception as exc2:
+                await pw.stop()
+                raise RuntimeError("No browser could be launched") from exc2
     try:
         yield browser
     finally:
@@ -43,20 +56,41 @@ async def get_browser() -> AsyncIterator[Browser]:
 
 
 @asynccontextmanager
-async def get_page(browser: Browser, locale: str = "en-US") -> AsyncIterator[Page]:
+async def get_page(
+    browser: Browser, locale: str = "en-US", market: str = "il",
+) -> AsyncIterator[Page]:
     """Create a new page with realistic viewport settings.
 
     Uses Playwright's default User-Agent (which matches the bundled
     Chromium version) to avoid fingerprint mismatches that trigger
-    bot detection.
+    bot detection.  Market-specific settings (timezone, geolocation,
+    language) are loaded from config/markets/.
     """
-    context = await browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        locale=locale,
-    )
-    # Remove navigator.webdriver flag (Chromium only; Firefox handles this differently)
+    geo = get_browser_geolocation(market)
+    ctx_kwargs: dict = {
+        "viewport": {"width": 1920, "height": 1080},
+        "locale": locale,
+        "timezone_id": get_browser_timezone(market),
+    }
+    if geo:
+        ctx_kwargs["geolocation"] = geo
+        ctx_kwargs["permissions"] = ["geolocation"]
+
+    context = await browser.new_context(**ctx_kwargs)
+
     if browser.browser_type.name == "chromium":
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        languages = get_browser_languages(market)
+        langs_js = ", ".join(f"'{lang}'" for lang in languages)
+        await context.add_init_script(f"""
+            Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
+            Object.defineProperty(navigator, 'plugins', {{
+                get: () => [1, 2, 3, 4, 5],
+            }});
+            Object.defineProperty(navigator, 'languages', {{
+                get: () => [{langs_js}],
+            }});
+            window.chrome = {{ runtime: {{}} }};
+        """)
     page = await context.new_page()
     try:
         yield page
