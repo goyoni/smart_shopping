@@ -1,0 +1,42 @@
+{
+  "code": "gr",
+  "name": "Greece",
+  "language": "el",
+  "tld": ".gr",
+  "currency": {
+    "code": "EUR",
+    "symbol": "\u20ac"
+  },
+  "google_domain": "google.gr",
+  "region_code": "gr-el",
+  "timezone": "Europe/Athens",
+  "geolocation": {"latitude": 37.9838, "longitude": 23.7275},
+  "browser_languages": ["el-GR", "el", "en-US", "en"],
+  "buy_online_suffix": "\u03b1\u03b3\u03bf\u03c1\u03ac online",
+  "marketplace_domains": {
+    "amazon.de": "de",
+    "amazon.it": "it"
+  },
+  "aggregators": [
+    {
+      "domain": "skroutz.gr",
+      "url_template": "https://www.skroutz.gr/search?keyphrase={query}",
+      "categories": []
+    },
+    {
+      "domain": "bestprice.gr",
+      "url_template": "https://www.bestprice.gr/search?q={query}",
+      "categories": []
+    },
+    {
+      "domain": "public.gr",
+      "url_template": "https://www.public.gr/search?q={query}",
+      "categories": ["electronics", "appliances"]
+    },
+    {
+      "domain": "mediamarkt.gr",
+      "url_template": "https://www.mediamarkt.gr/el/search.html?query={query}",
+      "categories": ["electronics", "appliances"]
+    }
+  ]
+}

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_api_key: str = ""
     llm_temperature: float = 0.2
+    scraper_llm_model: str = ""  # Override for scraper strategy discovery; falls back to llm_model
 
     model_config = {"env_file": "config/.env.local", "extra": "ignore"}
 

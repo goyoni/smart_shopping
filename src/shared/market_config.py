@@ -65,6 +65,10 @@ def get_region_code(market: str) -> str:
     try:
         return _load_market(market)["region_code"]
     except (FileNotFoundError, KeyError):
+        # Build a best-effort region code from the market code itself
+        # e.g. "gr" -> "gr-en", "jp" -> "jp-en"
+        if len(market) == 2 and market.isalpha():
+            return f"{market}-en"
         return "us-en"
 
 
