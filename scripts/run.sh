@@ -71,6 +71,31 @@ npm run dev &
 FRONTEND_PID=$!
 cd "$REPO_ROOT"
 
+# Start Ollama if an ollama model is configured
+OLLAMA_PID=""
+if echo "${LLM_MODEL:-}${SCRAPER_LLM_MODEL:-}" | grep -q "ollama/"; then
+    OLLAMA_BIN="$(command -v ollama 2>/dev/null || echo "")"
+    # Fallback to app bundle location
+    [ -z "$OLLAMA_BIN" ] && [ -x "/Applications/Ollama.app/Contents/Resources/ollama" ] && \
+        OLLAMA_BIN="/Applications/Ollama.app/Contents/Resources/ollama"
+    if [ -n "$OLLAMA_BIN" ]; then
+        if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+            echo "  Ollama:    http://localhost:11434"
+            "$OLLAMA_BIN" serve &
+            OLLAMA_PID=$!
+            # Wait for Ollama to be ready
+            for i in $(seq 1 10); do
+                curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && break
+                sleep 1
+            done
+        else
+            echo "  Ollama:    http://localhost:11434 (already running)"
+        fi
+    else
+        echo "  Warning: ollama/ model configured but ollama binary not found"
+    fi
+fi
+
 # Start Phoenix dashboard if installed
 PHOENIX_PID=""
 PHOENIX_PORT="${PHOENIX_PORT:-6006}"
@@ -91,9 +116,11 @@ cleanup() {
     kill "$BACKEND_PID" 2>/dev/null || true
     kill "$FRONTEND_PID" 2>/dev/null || true
     [ -n "$PHOENIX_PID" ] && kill "$PHOENIX_PID" 2>/dev/null || true
+    [ -n "$OLLAMA_PID" ] && kill "$OLLAMA_PID" 2>/dev/null || true
     wait "$BACKEND_PID" 2>/dev/null || true
     wait "$FRONTEND_PID" 2>/dev/null || true
     [ -n "$PHOENIX_PID" ] && wait "$PHOENIX_PID" 2>/dev/null || true
+    [ -n "$OLLAMA_PID" ] && wait "$OLLAMA_PID" 2>/dev/null || true
     echo "Done."
 }
 trap cleanup EXIT INT TERM
