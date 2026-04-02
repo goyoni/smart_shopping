@@ -18,14 +18,22 @@ _EMA_ALPHA = 0.3
 
 
 async def _seed_defaults() -> None:
-    """Insert default aggregator entries if the table is empty."""
-    async with async_session() as session:
-        count_result = await session.execute(select(AggregatorSite.id).limit(1))
-        if count_result.scalar_one_or_none() is not None:
-            return  # Already seeded
+    """Insert default aggregator entries for any markets missing from the DB."""
+    defaults = get_default_aggregators()
+    if not defaults:
+        return
 
-        defaults = get_default_aggregators()
+    async with async_session() as session:
+        # Find which markets already have entries
+        result = await session.execute(
+            select(AggregatorSite.market).distinct()
+        )
+        seeded_markets = {row[0] for row in result.all()}
+
+        added = 0
         for entry in defaults:
+            if entry["market"] in seeded_markets:
+                continue
             record = AggregatorSite(
                 domain=entry["domain"],
                 url_template=entry["url_template"],
@@ -34,8 +42,11 @@ async def _seed_defaults() -> None:
                 source="default",
             )
             session.add(record)
-        await session.commit()
-        logger.info("Seeded %d default aggregator sites", len(defaults))
+            added += 1
+
+        if added:
+            await session.commit()
+            logger.info("Seeded %d default aggregator sites", added)
 
 
 async def get_aggregators(

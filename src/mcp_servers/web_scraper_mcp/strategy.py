@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 
+import litellm
 from playwright.async_api import Page
 
+from src.shared.config import settings
 from src.shared.logging import get_logger
 
 logger = get_logger(__name__)
+
+def _get_scraper_llm_model() -> str:
+    """Return the LLM model to use for scraper strategy discovery."""
+    return settings.scraper_llm_model or settings.llm_model
 
 # CSS selector candidates tried in order for product containers
 _CONTAINER_CANDIDATES: list[str] = [
@@ -360,6 +367,11 @@ async def discover_strategy(
     if strategy:
         return strategy
 
+    # Fallback 3: LLM-based discovery — analyse the DOM and infer selectors
+    strategy = await _discover_via_llm(page, product_query, criteria)
+    if strategy:
+        return strategy
+
     logger.warning("Could not discover scraping strategy for page")
     return None
 
@@ -595,3 +607,299 @@ async def _discover_by_price_pattern(page: Page) -> ScrapingStrategy | None:
     except Exception:
         logger.warning("Price pattern discovery failed")
         return None
+
+
+# ===================================================================
+# LLM-based strategy discovery
+# ===================================================================
+
+_DOM_SNAPSHOT_JS = """() => {
+    const EXCLUDED_TAGS = new Set([
+        'script', 'style', 'noscript', 'svg', 'path', 'meta', 'link',
+        'br', 'hr', 'iframe', 'video', 'audio', 'canvas', 'map',
+    ]);
+    const EXCLUDED_REGIONS = new Set(['nav', 'header', 'footer']);
+
+    function isVisible(el) {
+        if (!el.offsetParent && el.tagName !== 'BODY' && el.tagName !== 'HTML')
+            return false;
+        const s = getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+    }
+
+    function inExcludedRegion(el) {
+        let node = el;
+        while (node) {
+            const tag = (node.tagName || '').toLowerCase();
+            const cls = (node.className || '').toString().toLowerCase();
+            if (EXCLUDED_REGIONS.has(tag)) return true;
+            if (cls.includes('nav') || cls.includes('menu') ||
+                cls.includes('sidebar') || cls.includes('footer') ||
+                cls.includes('header') || cls.includes('cookie') ||
+                cls.includes('banner') || cls.includes('modal'))
+                return true;
+            node = node.parentElement;
+        }
+        return false;
+    }
+
+    function describeEl(el, depth) {
+        const tag = el.tagName.toLowerCase();
+        if (EXCLUDED_TAGS.has(tag)) return null;
+        if (depth > 6) return null;
+        if (!isVisible(el)) return null;
+
+        const cls = el.className
+            ? (typeof el.className === 'string' ? el.className : '').split(/\\s+/).slice(0, 3).join(' ')
+            : '';
+        const dataAttrs = {};
+        for (const attr of el.attributes) {
+            if (attr.name.startsWith('data-') && attr.value.length < 60)
+                dataAttrs[attr.name] = attr.value.substring(0, 40);
+        }
+        const text = el.childNodes.length === 1 && el.childNodes[0].nodeType === 3
+            ? el.childNodes[0].textContent.trim().substring(0, 40)
+            : '';
+
+        const children = [];
+        // Detect repeating siblings: if >3 children share the same tag+class, collapse
+        const childGroups = {};
+        for (const child of el.children) {
+            const childTag = child.tagName.toLowerCase();
+            if (EXCLUDED_TAGS.has(childTag)) continue;
+            const childCls = child.className
+                ? (typeof child.className === 'string' ? child.className : '').split(/\\s+/).slice(0, 2).join(' ')
+                : '';
+            const key = `${childTag}.${childCls}`;
+            if (!childGroups[key]) childGroups[key] = [];
+            childGroups[key].push(child);
+        }
+
+        for (const [key, group] of Object.entries(childGroups)) {
+            if (group.length > 3) {
+                // Show first 2 expanded, note the rest
+                for (const child of group.slice(0, 2)) {
+                    const desc = describeEl(child, depth + 1);
+                    if (desc) children.push(desc);
+                }
+                children.push(`... ×${group.length - 2} more <${key}>`);
+            } else {
+                for (const child of group) {
+                    const desc = describeEl(child, depth + 1);
+                    if (desc) children.push(desc);
+                }
+            }
+        }
+
+        let repr = `<${tag}`;
+        if (cls) repr += ` class="${cls}"`;
+        for (const [k, v] of Object.entries(dataAttrs)) repr += ` ${k}="${v}"`;
+        repr += '>';
+        if (text) repr += text;
+
+        if (children.length === 0 && !text) return null;
+
+        const result = { repr, children: children.filter(Boolean) };
+        return result;
+    }
+
+    // Find the main content area
+    const main = document.querySelector('main, [role="main"], #content, .content, #main')
+        || document.body;
+    if (inExcludedRegion(main)) return JSON.stringify({ error: 'main is in excluded region' });
+
+    const snapshot = describeEl(main, 0);
+
+    // Flatten to a compact string representation
+    function flatten(node, indent) {
+        if (typeof node === 'string') return ' '.repeat(indent) + node;
+        if (!node) return '';
+        let lines = [' '.repeat(indent) + node.repr];
+        for (const child of (node.children || [])) {
+            const line = flatten(child, indent + 1);
+            if (line) lines.push(line);
+        }
+        return lines.join('\\n');
+    }
+
+    const text = flatten(snapshot, 0);
+    // Truncate to ~6000 chars to stay within token budget
+    return text.substring(0, 6000);
+}"""
+
+
+_LLM_SYSTEM_PROMPT = """\
+You are a web scraping expert. Given a simplified DOM snapshot of a product listing or search results page, \
+identify the CSS selectors needed to extract product data.
+
+Rules:
+- The "container" is the repeating element that wraps each individual product card/row.
+- Prefer class-based selectors. Use the most specific class that uniquely identifies product items.
+- For compound classes, use the CSS format: tag.class1.class2
+- Selectors must be valid CSS. Do not use XPath.
+- If you cannot identify a selector, use an empty string.
+
+Return ONLY a valid JSON object (no markdown, no explanation):
+{"container": "...", "name": "...", "price": "...", "image": "...", "url": "...", "currency": "..."}
+
+Where:
+- container: CSS selector for the repeating product wrapper element
+- name: CSS selector (relative to container) for the product name/title
+- price: CSS selector (relative to container) for the price
+- image: CSS selector (relative to container) for the product image
+- url: CSS selector (relative to container) for the link to the product page
+- currency: the currency code detected (e.g. "EUR", "USD", "ILS") or empty string"""
+
+
+async def _build_dom_snapshot(page: Page) -> str | None:
+    """Build a compact DOM snapshot of the main content area."""
+    try:
+        snapshot = await page.evaluate(_DOM_SNAPSHOT_JS)
+        if snapshot and len(snapshot) > 100:
+            return snapshot
+    except Exception:
+        logger.debug("DOM snapshot extraction failed")
+    return None
+
+
+async def _discover_via_llm(
+    page: Page,
+    product_query: str = "",
+    criteria: dict[str, dict] | None = None,
+) -> ScrapingStrategy | None:
+    """Use an LLM to analyse the rendered DOM and infer CSS selectors.
+
+    This is the last-resort fallback when CSS-candidate and price-pattern
+    discovery both fail. The result is validated against the live page before
+    being accepted.
+    """
+    model = _get_scraper_llm_model()
+    api_key = settings.llm_api_key
+    is_local = model.startswith("ollama/")
+    if not api_key and not is_local:
+        logger.debug("LLM strategy discovery skipped — no API key configured")
+        return None
+
+    snapshot = await _build_dom_snapshot(page)
+    if not snapshot:
+        return None
+
+    logger.info("Attempting LLM strategy discovery (model=%s, snapshot=%d chars)", model, len(snapshot))
+
+    try:
+        llm_kwargs = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Product query: {product_query}\n\nDOM snapshot:\n{snapshot}"},
+            ],
+            "temperature": 0.0,
+        }
+        if api_key:
+            llm_kwargs["api_key"] = api_key
+        response = await litellm.acompletion(**llm_kwargs)
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception:
+        logger.warning("LLM strategy discovery call failed", exc_info=True)
+        return None
+
+    # Parse the JSON response
+    # Strip markdown fences if present
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        selectors = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("LLM returned invalid JSON: %s", raw[:200])
+        return None
+
+    container_sel = selectors.get("container", "")
+    name_sel = selectors.get("name", "")
+    price_sel = selectors.get("price", "")
+    image_sel = selectors.get("image", "")
+    url_sel = selectors.get("url", "")
+    currency_hint = selectors.get("currency", "")
+
+    if not container_sel:
+        logger.warning("LLM returned empty container selector")
+        return None
+
+    # --- Validate against the live page ---
+    try:
+        containers = await page.query_selector_all(container_sel)
+    except Exception:
+        logger.warning("LLM container selector '%s' is invalid CSS", container_sel)
+        return None
+
+    if len(containers) < 2:
+        logger.warning(
+            "LLM container selector '%s' matched %d elements (need ≥2)",
+            container_sel, len(containers),
+        )
+        return None
+
+    # Verify at least one container has a name element
+    has_name = False
+    for probe in containers[:3]:
+        try:
+            el = await probe.query_selector(name_sel) if name_sel else None
+            if el:
+                text = (await el.inner_text()).strip()
+                if text and 2 <= len(text) <= 300:
+                    has_name = True
+                    break
+        except Exception:
+            continue
+
+    if not has_name:
+        # Try common name fallbacks before giving up
+        for fallback in ["a", "h2", "h3", "[class*='name']", "[class*='title']"]:
+            for probe in containers[:3]:
+                try:
+                    el = await probe.query_selector(fallback)
+                    if el:
+                        text = (await el.inner_text()).strip()
+                        if text and 2 <= len(text) <= 300:
+                            name_sel = fallback
+                            has_name = True
+                            break
+                except Exception:
+                    continue
+            if has_name:
+                break
+
+    if not has_name:
+        logger.warning("LLM strategy: no valid name element found in containers")
+        return None
+
+    # Detect currency from first price element if not provided by LLM
+    if not currency_hint and price_sel:
+        for probe in containers[:3]:
+            try:
+                price_el = await probe.query_selector(price_sel)
+                if price_el:
+                    price_text = await price_el.inner_text()
+                    currency_hint = _detect_currency(price_text)
+                    if currency_hint:
+                        break
+            except Exception:
+                continue
+
+    criteria_sels = await _discover_criteria_selectors(containers[0], criteria)
+
+    logger.info(
+        "LLM discovered strategy: container='%s' name='%s' price='%s' (%d containers)",
+        container_sel, name_sel, price_sel, len(containers),
+    )
+
+    return ScrapingStrategy(
+        product_container=container_sel,
+        name_selector=name_sel,
+        price_selector=price_sel,
+        image_selector=image_sel,
+        url_selector=url_sel,
+        currency_hint=currency_hint,
+        discovery_method="llm",
+        criteria_selectors=criteria_sels,
+    )

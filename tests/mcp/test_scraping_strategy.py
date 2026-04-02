@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.mcp_servers.web_scraper_mcp.strategy import (
     ScrapingStrategy,
     _detect_currency,
+    _discover_via_llm,
+    _get_scraper_llm_model,
     _looks_like_price,
 )
 
@@ -113,3 +118,150 @@ class TestDetectCurrency:
 
     def test_no_currency(self):
         assert _detect_currency("299") == ""
+
+
+class TestGetScraperLlmModel:
+    def test_defaults_to_llm_model(self):
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+            mock_settings.scraper_llm_model = ""
+            mock_settings.llm_model = "gpt-4o-mini"
+            assert _get_scraper_llm_model() == "gpt-4o-mini"
+
+    def test_override(self):
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+            mock_settings.scraper_llm_model = "ollama/llama3"
+            mock_settings.llm_model = "gpt-4o-mini"
+            assert _get_scraper_llm_model() == "ollama/llama3"
+
+
+class TestDiscoverViaLlm:
+    @pytest.fixture
+    def mock_page(self):
+        page = AsyncMock()
+        # Simulate containers with name and price elements
+        container = AsyncMock()
+        name_el = AsyncMock()
+        name_el.inner_text = AsyncMock(return_value="Braun PL5147 IPL")
+        price_el = AsyncMock()
+        price_el.inner_text = AsyncMock(return_value="€369.18")
+
+        def _query_selector(sel):
+            if "name" in sel or sel in ("a", "h2", "h3"):
+                return name_el
+            if "price" in sel:
+                return price_el
+            return None
+
+        container.query_selector = AsyncMock(side_effect=_query_selector)
+        page.query_selector_all = AsyncMock(return_value=[container, container, container])
+        page.evaluate = AsyncMock(return_value="<div class='sku'>" + "x" * 120 + "</div>")
+        return page
+
+    @pytest.mark.asyncio
+    async def test_skipped_without_api_key(self):
+        page = AsyncMock()
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+            mock_settings.llm_api_key = ""
+            mock_settings.scraper_llm_model = ""
+            mock_settings.llm_model = "gpt-4o-mini"
+            result = await _discover_via_llm(page, "pl5147")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_successful_discovery(self, mock_page):
+        llm_response = MagicMock()
+        llm_response.choices = [MagicMock()]
+        llm_response.choices[0].message.content = json.dumps({
+            "container": "li.cf.card",
+            "name": "a.js-sku-link",
+            "price": "span.price",
+            "image": "img",
+            "url": "a.js-sku-link",
+            "currency": "EUR",
+        })
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+        ):
+            mock_settings.llm_api_key = "test-key"
+            mock_settings.scraper_llm_model = ""
+            mock_settings.llm_model = "gpt-4o-mini"
+            mock_litellm.acompletion = AsyncMock(return_value=llm_response)
+
+            result = await _discover_via_llm(mock_page, "pl5147")
+
+        assert result is not None
+        assert result.product_container == "li.cf.card"
+        assert result.discovery_method == "llm"
+        assert result.currency_hint == "EUR"
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_json(self, mock_page):
+        llm_response = MagicMock()
+        llm_response.choices = [MagicMock()]
+        llm_response.choices[0].message.content = "Sorry, I can't do that."
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+        ):
+            mock_settings.llm_api_key = "test-key"
+            mock_settings.scraper_llm_model = ""
+            mock_settings.llm_model = "gpt-4o-mini"
+            mock_litellm.acompletion = AsyncMock(return_value=llm_response)
+
+            result = await _discover_via_llm(mock_page, "pl5147")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_rejects_selector_with_too_few_containers(self):
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value="<div>snapshot" + "x" * 120 + "</div>")
+        page.query_selector_all = AsyncMock(return_value=[AsyncMock()])  # Only 1
+
+        llm_response = MagicMock()
+        llm_response.choices = [MagicMock()]
+        llm_response.choices[0].message.content = json.dumps({
+            "container": "div.nonexistent",
+            "name": "a", "price": "span", "image": "", "url": "", "currency": "",
+        })
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+        ):
+            mock_settings.llm_api_key = "test-key"
+            mock_settings.scraper_llm_model = ""
+            mock_settings.llm_model = "gpt-4o-mini"
+            mock_litellm.acompletion = AsyncMock(return_value=llm_response)
+
+            result = await _discover_via_llm(page, "pl5147")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_uses_scraper_llm_model_override(self, mock_page):
+        llm_response = MagicMock()
+        llm_response.choices = [MagicMock()]
+        llm_response.choices[0].message.content = json.dumps({
+            "container": "div.product",
+            "name": "a", "price": "span.price",
+            "image": "", "url": "", "currency": "",
+        })
+
+        with (
+            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+        ):
+            mock_settings.llm_api_key = "test-key"
+            mock_settings.scraper_llm_model = "ollama/llama3"
+            mock_settings.llm_model = "gpt-4o-mini"
+            mock_litellm.acompletion = AsyncMock(return_value=llm_response)
+
+            await _discover_via_llm(mock_page, "pl5147")
+
+            # Verify the override model was used
+            call_kwargs = mock_litellm.acompletion.call_args
+            assert call_kwargs.kwargs["model"] == "ollama/llama3"

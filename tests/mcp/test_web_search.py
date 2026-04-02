@@ -32,8 +32,12 @@ class TestBuildSearchUrl:
         url = build_search_url("אוזניות", language="he", market="il")
         assert "kl=il-he" in url
 
-    def test_unknown_market_defaults_to_us(self):
+    def test_unknown_market_derives_region_code(self):
         url = build_search_url("laptop", market="zz")
+        assert "kl=zz-en" in url
+
+    def test_invalid_market_defaults_to_us(self):
+        url = build_search_url("laptop", market="123")
         assert "kl=us-en" in url
 
     def test_query_augmentation_english(self):
