@@ -18,7 +18,12 @@ async def test_get_browser_lifecycle():
     mock_pw_ctx = AsyncMock()
     mock_pw_ctx.start.return_value = mock_pw
 
-    with patch("src.shared.browser.async_playwright", return_value=mock_pw_ctx):
+    with (
+        patch("src.shared.browser.async_playwright", return_value=mock_pw_ctx),
+        patch("src.shared.browser.settings") as mock_settings,
+    ):
+        mock_settings.browser_ws_endpoint = ""
+        mock_settings.playwright_headless = True
         async with get_browser() as browser:
             assert browser is mock_browser
 
@@ -36,7 +41,12 @@ async def test_get_browser_launches_headless():
     mock_pw_ctx = AsyncMock()
     mock_pw_ctx.start.return_value = mock_pw
 
-    with patch("src.shared.browser.async_playwright", return_value=mock_pw_ctx):
+    with (
+        patch("src.shared.browser.async_playwright", return_value=mock_pw_ctx),
+        patch("src.shared.browser.settings") as mock_settings,
+    ):
+        mock_settings.browser_ws_endpoint = ""
+        mock_settings.playwright_headless = True
         async with get_browser() as _browser:
             pass
 

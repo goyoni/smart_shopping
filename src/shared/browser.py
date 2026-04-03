@@ -20,38 +20,54 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def get_browser() -> AsyncIterator[Browser]:
-    """Launch a headless browser for page scraping.
+    """Get a browser instance for page scraping.
 
-    Tries Chromium first, falls back to Firefox if Chromium fails to launch.
+    If ``BROWSER_WS_ENDPOINT`` is set (e.g. ``ws://localhost:3000``),
+    connects to a remote browser (Docker container).  Otherwise launches
+    a local Chromium/Firefox instance.
     """
     pw = await async_playwright().start()
     browser: Browser | None = None
-    try:
-        browser = await pw.chromium.launch(
-            headless=settings.playwright_headless,
-            channel="chrome",
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-    except Exception:
-        # channel="chrome" requires Chrome installed; fall back to bundled Chromium
+    is_remote = False
+
+    # Try remote browser first
+    ws = settings.browser_ws_endpoint
+    if ws:
+        try:
+            browser = await pw.chromium.connect(ws)
+            is_remote = True
+            logger.info("Connected to remote browser at %s", ws)
+        except Exception as exc:
+            logger.warning("Remote browser connection failed (%s), falling back to local launch", exc)
+
+    # Fall back to local launch
+    if not browser:
         try:
             browser = await pw.chromium.launch(
                 headless=settings.playwright_headless,
+                channel="chrome",
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
-        except Exception as exc:
-            logger.warning("Chromium launch failed (%s), falling back to Firefox", exc)
+        except Exception:
             try:
-                browser = await pw.firefox.launch(
+                browser = await pw.chromium.launch(
                     headless=settings.playwright_headless,
+                    args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
                 )
-            except Exception as exc2:
-                await pw.stop()
-                raise RuntimeError("No browser could be launched") from exc2
+            except Exception as exc:
+                logger.warning("Chromium launch failed (%s), falling back to Firefox", exc)
+                try:
+                    browser = await pw.firefox.launch(
+                        headless=settings.playwright_headless,
+                    )
+                except Exception as exc2:
+                    await pw.stop()
+                    raise RuntimeError("No browser could be launched") from exc2
     try:
         yield browser
     finally:
-        await browser.close()
+        if not is_remote:
+            await browser.close()
         await pw.stop()
 
 

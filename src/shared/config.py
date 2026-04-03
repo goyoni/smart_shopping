@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     default_language: str = "en"
     default_market: str = "us"
     playwright_headless: bool = True
+    browser_ws_endpoint: str = ""  # WebSocket URL for remote browser (e.g. ws://localhost:3000)
     geoip_db_path: str = "data/GeoLite2-Country.mmdb"
     otel_exporter_endpoint: str = ""
     phoenix_enabled: bool = True
