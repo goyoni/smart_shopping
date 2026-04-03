@@ -61,6 +61,25 @@ echo "Starting Smart Shopping Agent..."
 echo "  Backend:  http://localhost:$PORT"
 echo "  Frontend: http://localhost:3000"
 
+# Start Docker browser container if BROWSER_WS_ENDPOINT is set and Docker is available
+DOCKER_STARTED=false
+if [ -n "${BROWSER_WS_ENDPOINT:-}" ] && command -v docker >/dev/null 2>&1; then
+    if ! curl -sf http://localhost:3000 >/dev/null 2>&1; then
+        echo "  Browser:   ws://localhost:3000 (Docker)"
+        docker compose up -d --build 2>&1 | tail -3
+        DOCKER_STARTED=true
+        # Wait for browser to be ready
+        for i in $(seq 1 30); do
+            curl -sf http://localhost:3000 >/dev/null 2>&1 && break
+            sleep 1
+        done
+    else
+        echo "  Browser:   ws://localhost:3000 (already running)"
+    fi
+elif [ -n "${BROWSER_WS_ENDPOINT:-}" ]; then
+    echo "  Warning: BROWSER_WS_ENDPOINT set but Docker not found — install Docker Desktop"
+fi
+
 # Start backend in background
 uvicorn src.backend.main:app --reload --host "${BACKEND_HOST:-0.0.0.0}" --port "$PORT" &
 BACKEND_PID=$!
@@ -121,6 +140,9 @@ cleanup() {
     wait "$FRONTEND_PID" 2>/dev/null || true
     [ -n "$PHOENIX_PID" ] && wait "$PHOENIX_PID" 2>/dev/null || true
     [ -n "$OLLAMA_PID" ] && wait "$OLLAMA_PID" 2>/dev/null || true
+    if [ "$DOCKER_STARTED" = true ]; then
+        docker compose down 2>/dev/null || true
+    fi
     echo "Done."
 }
 trap cleanup EXIT INT TERM
