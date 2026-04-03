@@ -466,6 +466,25 @@ async def _attempt_playwright(
         except Exception:
             pass
 
+        # Dismiss cookie consent banners that block SPA rendering
+        try:
+            consent_selectors = [
+                "[id*='CookiebotDialogBodyLevelButtonLevelOptinAllowAll']",
+                "button[class*='cookie'][class*='accept']",
+                "button[data-action='accept']",
+                "button:has-text('Accept all')",
+                "button:has-text('Accept')",
+                "button:has-text('OK')",
+            ]
+            for sel in consent_selectors:
+                btn = page.locator(sel).first
+                if await btn.count() > 0 and await btn.is_visible():
+                    await btn.click(timeout=2000)
+                    _pipeline_event(domain, "playwright", "dismissed cookie consent banner")
+                    break
+        except Exception:
+            pass
+
         # Wait for content
         try:
             await page.wait_for_load_state("networkidle", timeout=10000)
@@ -476,7 +495,7 @@ async def _attempt_playwright(
             await page.wait_for_selector(
                 "[class*='price'], [class*='Price'], [data-price], "
                 "[class*='product'], [class*='Product']",
-                timeout=5000,
+                timeout=8000,
             )
         except Exception:
             pass
@@ -517,8 +536,9 @@ async def _attempt_playwright(
                 captured_responses, criteria,
             )
             if all_results:
-                winning_method, products = all_results[0]
-                _pipeline_event(domain, "playwright", f"extract_all found {len(products)} products via {winning_method}", product_count=len(products))
+                # Pick the method that found the most products
+                winning_method, products = max(all_results, key=lambda r: len(r[1]))
+                _pipeline_event(domain, "playwright", f"extract_all found {len(products)} products via {winning_method} (from {len(all_results)} methods)", product_count=len(products))
 
                 # Save newly discovered strategy
                 if winning_method == "css_strategy":
@@ -540,6 +560,37 @@ async def _attempt_playwright(
                     await save_strategy(domain, api_strategy, page_type)
             else:
                 _pipeline_event(domain, "playwright", f"extract_all returned 0 products (api_responses={len(captured_responses)})")
+
+        # If we got 0-1 products, check in-page captured API responses (SPA search APIs)
+        if len(products) <= 1:
+            import asyncio as _asyncio
+            _pipeline_event(domain, "playwright", f"low results ({len(products)}), checking in-page API captures...")
+            await _asyncio.sleep(5)
+            try:
+                js_responses = await page.evaluate("window.__capturedApiResponses || []")
+                if js_responses:
+                    _pipeline_event(domain, "playwright", f"found {len(js_responses)} in-page API responses")
+                    for resp in js_responses:
+                        if resp not in captured_responses:
+                            captured_responses.append(resp)
+            except Exception:
+                pass
+            if captured_responses:
+                api_products = extract_from_api_responses(
+                    captured_responses, url, domain, product_query,
+                )
+                if len(api_products) > len(products):
+                    products = api_products
+                    winning_method = "api_intercept"
+                    _pipeline_event(domain, "playwright", f"late API intercept found {len(products)} products", product_count=len(products))
+                    api_strategy = ScrapingStrategy(
+                        product_container="",
+                        discovery_method="api_intercept",
+                        access_method="playwright",
+                        extraction_method="api_intercept",
+                        last_successful_url=url,
+                    )
+                    await save_strategy(domain, api_strategy, page_type)
 
         if products:
             _pipeline_event(domain, "playwright", f"SUCCESS: {len(products)} products via {winning_method}", product_count=len(products))

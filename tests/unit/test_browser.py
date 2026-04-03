@@ -103,7 +103,8 @@ async def test_get_page_uses_market_config():
     mock_langs.assert_called_once_with("de")
 
     call_kwargs = mock_browser.new_context.call_args.kwargs
-    assert "user_agent" not in call_kwargs
+    assert "user_agent" in call_kwargs
+    assert "HeadlessChrome" not in call_kwargs["user_agent"]
     assert call_kwargs["locale"] == "de-DE"
     assert call_kwargs["viewport"] == {"width": 1920, "height": 1080}
     assert call_kwargs["timezone_id"] == "Europe/Berlin"

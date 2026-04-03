@@ -82,20 +82,30 @@ def extract_all_from_soup(
     if products:
         results.append(("data_attrs", products))
 
-    # 2. JSON-LD
+    # 2. JSON-LD (single Product)
     product = _extract_jsonld_from_soup(soup, url, domain)
     if product:
         results.append(("jsonld", [product]))
 
-    # 3. Microdata (itemprop)
+    # 3. JSON-LD ItemList (product listings / search results)
+    itemlist_products = _extract_jsonld_itemlist_from_soup(soup, url, domain)
+    if itemlist_products:
+        results.append(("jsonld_itemlist", itemlist_products))
+
+    # 4. Microdata (itemprop)
     product = _extract_microdata_from_soup(soup, url, domain)
     if product:
         results.append(("microdata", [product]))
 
-    # 4. OG meta tags
+    # 5. OG meta tags
     product = _extract_og_product_from_soup(soup, url, domain)
     if product:
         results.append(("og_meta", [product]))
+
+    # 6. CSS listing cards (search/category pages with visible product cards)
+    listing_products = _extract_listing_cards_from_soup(soup, url, domain)
+    if listing_products:
+        results.append(("css_listing", listing_products))
 
     return results
 
@@ -230,9 +240,66 @@ def _extract_from_data_attrs(
 # ===================================================================
 
 
+def _parse_jsonld_product(
+    item: dict, page_url: str, domain: str,
+) -> ProductResult | None:
+    """Parse a single JSON-LD Product item into a ProductResult."""
+    if not isinstance(item, dict):
+        return None
+    if item.get("@type") != "Product":
+        return None
+
+    name = (item.get("name") or "").strip()
+    if not name or len(name) < 3:
+        return None
+
+    offers = item.get("offers", {})
+    offer = offers[0] if isinstance(offers, list) and offers else offers
+    if not isinstance(offer, dict):
+        offer = {}
+
+    price_raw = offer.get("price") or offer.get("lowPrice")
+    price = float(price_raw) if price_raw else None
+    if price is not None and (price <= 0 or price > _MAX_SANE_PRICE):
+        price = None
+
+    currency = (offer.get("priceCurrency") or "").strip()
+    if not currency:
+        currency = get_default_currency_for_domain(domain)
+
+    brand_obj = item.get("brand")
+    brand = None
+    if isinstance(brand_obj, dict):
+        brand = brand_obj.get("name")
+    elif isinstance(brand_obj, str):
+        brand = brand_obj
+
+    model_id_raw = item.get("mpn") or item.get("sku") or item.get("gtin13") or None
+    model_id = str(model_id_raw) if model_id_raw is not None else None
+
+    image = item.get("image")
+    if isinstance(image, list):
+        image = image[0] if image else None
+
+    # Resolve product URL from offers if available
+    product_url = str(page_url)
+    offer_url = offer.get("url")
+    if offer_url and isinstance(offer_url, str):
+        product_url = urljoin(str(page_url), offer_url)
+
+    return ProductResult(
+        name=name,
+        model_id=model_id,
+        brand=brand,
+        image_url=image if isinstance(image, str) else None,
+        sellers=[Seller(name=domain, price=price, currency=currency, url=product_url)],
+    )
+
+
 def _extract_jsonld_from_soup(
     soup: BeautifulSoup, page_url: str, domain: str,
 ) -> ProductResult | None:
+    """Extract a single Product from JSON-LD."""
     import json
     for script in soup.find_all("script", type="application/ld+json"):
         try:
@@ -241,56 +308,50 @@ def _extract_jsonld_from_soup(
             continue
 
         items = [data] if isinstance(data, dict) else data if isinstance(data, list) else []
-        # Handle @graph
         if isinstance(data, dict) and "@graph" in data:
             items = data["@graph"]
 
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            if item.get("@type") != "Product":
-                continue
-
-            name = (item.get("name") or "").strip()
-            if not name or len(name) < 3:
-                continue
-
-            offers = item.get("offers", {})
-            offer = offers[0] if isinstance(offers, list) and offers else offers
-            if not isinstance(offer, dict):
-                offer = {}
-
-            price_raw = offer.get("price") or offer.get("lowPrice")
-            price = float(price_raw) if price_raw else None
-            if price is not None and (price <= 0 or price > _MAX_SANE_PRICE):
-                price = None
-
-            currency = (offer.get("priceCurrency") or "").strip()
-            if not currency:
-                currency = get_default_currency_for_domain(domain)
-
-            brand_obj = item.get("brand")
-            brand = None
-            if isinstance(brand_obj, dict):
-                brand = brand_obj.get("name")
-            elif isinstance(brand_obj, str):
-                brand = brand_obj
-
-            model_id = item.get("mpn") or item.get("sku") or item.get("gtin13") or None
-
-            image = item.get("image")
-            if isinstance(image, list):
-                image = image[0] if image else None
-
-            return ProductResult(
-                name=name,
-                model_id=model_id,
-                brand=brand,
-                image_url=image if isinstance(image, str) else None,
-                sellers=[Seller(name=domain, price=price, currency=currency, url=page_url)],
-            )
+            product = _parse_jsonld_product(item, page_url, domain)
+            if product:
+                return product
 
     return None
+
+
+def _extract_jsonld_itemlist_from_soup(
+    soup: BeautifulSoup, page_url: str, domain: str,
+) -> list[ProductResult]:
+    """Extract products from JSON-LD ItemList (common on listing/search pages)."""
+    import json
+    products: list[ProductResult] = []
+
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if not isinstance(data, dict) or data.get("@type") != "ItemList":
+            continue
+
+        list_elements = data.get("itemListElement", {})
+        # Can be a dict (keyed by ID) or a list
+        if isinstance(list_elements, dict):
+            list_elements = list(list_elements.values())
+        if not isinstance(list_elements, list):
+            continue
+
+        for el in list_elements:
+            if not isinstance(el, dict):
+                continue
+            # ListItem wraps the actual Product in "item"
+            item = el.get("item", el)
+            product = _parse_jsonld_product(item, page_url, domain)
+            if product:
+                products.append(product)
+
+    return products[:_MAX_PRODUCTS_PER_SITE]
 
 
 # ===================================================================
@@ -394,6 +455,86 @@ def _extract_og_product_from_soup(
         image_url=image_url,
         sellers=[Seller(name=domain, price=price, currency=currency, url=page_url)],
     )
+
+
+# ===================================================================
+# CSS listing card extraction (search/category pages)
+# ===================================================================
+
+
+def _extract_listing_cards_from_soup(
+    soup: BeautifulSoup, page_url: str, domain: str,
+) -> list[ProductResult]:
+    """Extract products from listing/search page HTML cards.
+
+    Looks for repeated card-like elements that each contain a product name,
+    price, and link.  Works on sites like skroutz.gr, bestprice.gr etc.
+    """
+    products: list[ProductResult] = []
+    currency = get_default_currency_for_domain(domain)
+
+    # Common card container selectors (order by specificity)
+    card_selectors = [
+        "li.card",
+        "[class*='product-card']",
+        "[class*='ProductCard']",
+        "[class*='product-item']",
+        "div[data-product-id]",
+        "article[class*='product']",
+    ]
+
+    cards = []
+    for sel in card_selectors:
+        cards = soup.select(sel)
+        if len(cards) >= 2:
+            break
+
+    if len(cards) < 2:
+        return []
+
+    for card in cards[:_MAX_PRODUCTS_PER_SITE]:
+        # Extract product name from first link with text
+        name = ""
+        product_url = page_url
+        link = card.select_one("a[href]")
+        if link:
+            name = link.get_text(strip=True)[:200]
+            href = link.get("href", "")
+            if href:
+                product_url = urljoin(page_url, href)
+
+        if not name or len(name) < 3:
+            # Try any heading
+            heading = card.select_one("h2, h3, h4, [class*='name'], [class*='title']")
+            if heading:
+                name = heading.get_text(strip=True)[:200]
+
+        if not name or len(name) < 3:
+            continue
+
+        # Extract price
+        price = None
+        price_el = card.select_one("[class*='price'], [data-price]")
+        if price_el:
+            price_text = price_el.get("data-price") or price_el.get_text(strip=True)
+            price = _parse_price(price_text or "")
+
+        # Extract image
+        img = card.select_one("img[src], img[data-src]")
+        image_url = None
+        if img:
+            image_url = img.get("src") or img.get("data-src")
+            if image_url:
+                image_url = urljoin(page_url, image_url)
+
+        products.append(ProductResult(
+            name=name,
+            model_id=_extract_model_from_text(name),
+            image_url=image_url,
+            sellers=[Seller(name=domain, price=price, currency=currency, url=product_url)],
+        ))
+
+    return products
 
 
 # ===================================================================

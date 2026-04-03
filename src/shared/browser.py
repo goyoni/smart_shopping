@@ -87,6 +87,12 @@ async def get_page(
         "viewport": {"width": 1920, "height": 1080},
         "locale": locale,
         "timezone_id": get_browser_timezone(market),
+        # Override HeadlessChrome UA to avoid bot detection by APIs like findbar.io
+        "user_agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
     }
     if geo:
         ctx_kwargs["geolocation"] = geo
@@ -94,19 +100,40 @@ async def get_page(
 
     context = await browser.new_context(**ctx_kwargs)
 
-    if browser.browser_type.name == "chromium":
-        languages = get_browser_languages(market)
-        langs_js = ", ".join(f"'{lang}'" for lang in languages)
-        await context.add_init_script(f"""
-            Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
-            Object.defineProperty(navigator, 'plugins', {{
-                get: () => [1, 2, 3, 4, 5],
-            }});
-            Object.defineProperty(navigator, 'languages', {{
-                get: () => [{langs_js}],
-            }});
-            window.chrome = {{ runtime: {{}} }};
-        """)
+    languages = get_browser_languages(market)
+    langs_js = ", ".join(f"'{lang}'" for lang in languages)
+    await context.add_init_script(f"""
+        Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
+        Object.defineProperty(navigator, 'plugins', {{
+            get: () => [1, 2, 3, 4, 5],
+        }});
+        Object.defineProperty(navigator, 'languages', {{
+            get: () => [{langs_js}],
+        }});
+        window.chrome = {{ runtime: {{}} }};
+
+        // Intercept fetch/XHR JSON responses for API data capture
+        window.__capturedApiResponses = [];
+        const _origFetch = window.fetch;
+        window.fetch = async function(...args) {{
+            const resp = await _origFetch.apply(this, args);
+            try {{
+                const ct = resp.headers.get('content-type') || '';
+                if (ct.includes('json') && resp.ok) {{
+                    const clone = resp.clone();
+                    clone.json().then(data => {{
+                        if (window.__capturedApiResponses.length < 20) {{
+                            window.__capturedApiResponses.push({{
+                                url: resp.url || String(args[0]),
+                                data: data,
+                            }});
+                        }}
+                    }}).catch(() => {{}});
+                }}
+            }} catch(e) {{}}
+            return resp;
+        }};
+    """)
     page = await context.new_page()
     try:
         yield page
