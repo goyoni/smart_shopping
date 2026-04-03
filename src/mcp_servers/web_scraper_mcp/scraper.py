@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 from curl_cffi.requests import AsyncSession as CurlSession
+from opentelemetry import trace as otel_trace
 from playwright.async_api import Browser, Response
 
 from src.mcp_servers.web_scraper_mcp.db_cache import (
@@ -44,6 +45,16 @@ from src.shared.market_config import get_default_currency_for_domain, get_garbag
 from src.shared.models import ProductResult, Seller
 
 logger = get_logger(__name__)
+
+
+def _pipeline_event(domain: str, step: str, detail: str, **attrs: object) -> None:
+    """Log a pipeline step and record it as a span event on the active OTEL span."""
+    msg = f"[{step}] {domain} — {detail}"
+    logger.info(msg)
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        span.add_event(f"pipeline.{step}", {"domain": domain, "detail": detail, **attrs})
+
 
 _MAX_PRODUCTS_PER_SITE = 50
 _MAX_PAGES = 3
@@ -221,7 +232,13 @@ async def scrape_page(
 
     last_failure: FailureType | None = None
 
+    order = [m for (m,) in pipeline]
+    cached_method = cached.discovery_method if cached else None
+    _pipeline_event(domain, "pipeline", f"order={order} cached={cached_method}", page_type=page_type)
+
     for (access_method,) in pipeline:
+        _pipeline_event(domain, access_method, "attempting")
+
         if access_method in ("httpx", "curl_cffi"):
             result = await _attempt_http(
                 url, product_query, domain, page_type,
@@ -241,18 +258,13 @@ async def scrape_page(
             else:
                 last_failure = FailureType.LOW_QUALITY
                 await mark_validation_failure(domain, page_type)
-                logger.info(
-                    "Results from %s/%s failed validation, trying next method",
-                    access_method, result.extraction_method,
-                )
+                _pipeline_event(domain, access_method, f"validation failed via {result.extraction_method}")
                 continue
 
         last_failure = result.failure_type
-        logger.info(
-            "Access method %s failed for %s: %s (%s)",
-            access_method, domain,
-            last_failure.value if last_failure else "unknown",
-            result.failure_detail,
+        _pipeline_event(
+            domain, access_method,
+            f"failed: {last_failure.value if last_failure else 'unknown'} ({result.failure_detail})",
         )
 
         # Don't waste time on methods that can't help
@@ -323,6 +335,12 @@ async def _attempt_http(
     # Classify failure
     if html is None or len(html) < 1000:
         failure = classify_http_failure(status_code, html or "", error)
+        err_name = type(error).__name__ if error else None
+        _pipeline_event(
+            domain, access_method,
+            f"HTTP failed: status={status_code} body={len(html or '')} err={err_name} → {failure.value if failure else 'unknown'}",
+            status_code=status_code or 0,
+        )
         return ExtractionResult(
             access_method=access_method,
             failure_type=failure,
@@ -332,11 +350,13 @@ async def _attempt_http(
         )
 
     # Run all extraction methods on the HTML
+    _pipeline_event(domain, access_method, f"HTTP 200, body={len(html)} chars, extracting...", body_length=len(html))
     soup = BeautifulSoup(html, "lxml")
     extraction_results = extract_all_from_soup(soup, url, domain, product_query)
 
     if extraction_results:
         method_name, products = extraction_results[0]
+        _pipeline_event(domain, access_method, f"extracted {len(products)} products via {method_name}", product_count=len(products))
         return ExtractionResult(
             products=products,
             access_method=access_method,
@@ -346,6 +366,7 @@ async def _attempt_http(
         )
 
     # HTML was fetched but no products extracted — likely a JS SPA
+    _pipeline_event(domain, access_method, "200 OK but 0 products in static HTML (JS SPA?)")
     return ExtractionResult(
         access_method=access_method,
         failure_type=FailureType.JS_SPA_NO_DATA,
@@ -401,9 +422,11 @@ async def _attempt_playwright(
         page.on("response", _on_response)
 
         # Navigate
+        _pipeline_event(domain, "playwright", f"navigating to {url[:120]}")
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except Exception as exc:
+            _pipeline_event(domain, "playwright", f"navigation failed: {str(exc)[:200]}")
             return ExtractionResult(
                 access_method="playwright",
                 failure_type=FailureType.NAVIGATION_FAILED,
@@ -417,7 +440,7 @@ async def _attempt_playwright(
             title = await page.title()
             title_lower = title.lower()
             if "just a moment" in title_lower:
-                logger.info("JS challenge on %s, waiting for resolution", domain)
+                _pipeline_event(domain, "playwright", "JS challenge detected, waiting for resolution")
                 try:
                     await page.wait_for_function(
                         "document.title.toLowerCase().indexOf('just a moment') === -1",
@@ -459,11 +482,14 @@ async def _attempt_playwright(
             pass
 
         # --- Extraction pipeline ---
+        _pipeline_event(domain, "playwright", "page loaded, starting extraction")
         products: list[ProductResult] = []
         winning_method = ""
 
         # Try cached strategy first (fast path)
         if cached and cached.extraction_method in ("css_strategy", "api_intercept", ""):
+            container_preview = cached.product_container[:60] if cached.product_container else ""
+            _pipeline_event(domain, "playwright", f"trying cached strategy: method={cached.discovery_method} container='{container_preview}'")
             if cached.discovery_method == "api_intercept":
                 products = extract_from_api_responses(
                     captured_responses, url, domain, product_query,
@@ -476,10 +502,13 @@ async def _attempt_playwright(
                     winning_method = "css_strategy"
 
             if products:
+                _pipeline_event(domain, "playwright", f"cached strategy hit: {len(products)} products via {winning_method}", product_count=len(products))
                 await update_success_rate(domain, success=True, page_type=page_type)
             else:
-                logger.info("Cached strategy failed for %s/%s, trying all methods", domain, page_type)
+                _pipeline_event(domain, "playwright", "cached strategy miss, trying all methods")
                 await update_success_rate(domain, success=False, page_type=page_type)
+        else:
+            _pipeline_event(domain, "playwright", "no usable cached strategy, trying all methods")
 
         # If cached strategy didn't work, try all extraction methods
         if not products:
@@ -489,11 +518,13 @@ async def _attempt_playwright(
             )
             if all_results:
                 winning_method, products = all_results[0]
+                _pipeline_event(domain, "playwright", f"extract_all found {len(products)} products via {winning_method}", product_count=len(products))
 
                 # Save newly discovered strategy
                 if winning_method == "css_strategy":
                     strategy = await discover_strategy(page, product_query, criteria=criteria)
                     if strategy:
+                        _pipeline_event(domain, "playwright", f"saving strategy: method={strategy.discovery_method} container='{strategy.product_container[:60]}'")
                         strategy.access_method = "playwright"
                         strategy.extraction_method = "css_strategy"
                         strategy.last_successful_url = url
@@ -507,8 +538,11 @@ async def _attempt_playwright(
                         last_successful_url=url,
                     )
                     await save_strategy(domain, api_strategy, page_type)
+            else:
+                _pipeline_event(domain, "playwright", f"extract_all returned 0 products (api_responses={len(captured_responses)})")
 
         if products:
+            _pipeline_event(domain, "playwright", f"SUCCESS: {len(products)} products via {winning_method}", product_count=len(products))
             return ExtractionResult(
                 products=products,
                 access_method="playwright",
@@ -526,6 +560,7 @@ async def _attempt_playwright(
             body_length = 0
 
         failure = classify_playwright_failure(title, body_length)
+        _pipeline_event(domain, "playwright", f"FAILED: {failure.value if failure else 'unknown'} (title='{title[:80]}', body={body_length})")
         return ExtractionResult(
             access_method="playwright",
             failure_type=failure,

@@ -358,21 +358,27 @@ async def discover_strategy(
         )
 
     # Fallback 1: single-product page discovery (product detail pages)
+    logger.info("[strategy] CSS candidates failed, trying single-product fallback")
     strategy = await _discover_single_product(page, criteria)
     if strategy:
+        logger.info("[strategy] single-product discovery succeeded: container='%s'", strategy.product_container[:60])
         return strategy
 
     # Fallback 2: price-pattern based discovery
+    logger.info("[strategy] single-product failed, trying price-pattern fallback")
     strategy = await _discover_by_price_pattern(page)
     if strategy:
+        logger.info("[strategy] price-pattern discovery succeeded: container='%s'", strategy.product_container[:60])
         return strategy
 
     # Fallback 3: LLM-based discovery — analyse the DOM and infer selectors
+    logger.info("[strategy] price-pattern failed, trying LLM fallback")
     strategy = await _discover_via_llm(page, product_query, criteria)
     if strategy:
+        logger.info("[strategy] LLM discovery succeeded: container='%s'", strategy.product_container[:60])
         return strategy
 
-    logger.warning("Could not discover scraping strategy for page")
+    logger.warning("[strategy] All discovery methods failed (css_candidates → single_product → price_pattern → llm)")
     return None
 
 
