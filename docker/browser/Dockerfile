@@ -1,6 +1,7 @@
 FROM mcr.microsoft.com/playwright:v1.52.0-noble
 
-RUN npx playwright install chromium
+WORKDIR /srv
+RUN npm init -y && npm install playwright@1.58.0 && npx playwright install chromium
 
 EXPOSE 3000
 

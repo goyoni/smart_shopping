@@ -64,17 +64,17 @@ echo "  Frontend: http://localhost:3000"
 # Start Docker browser container if BROWSER_WS_ENDPOINT is set and Docker is available
 DOCKER_STARTED=false
 if [ -n "${BROWSER_WS_ENDPOINT:-}" ] && command -v docker >/dev/null 2>&1; then
-    if ! curl -sf http://localhost:3000 >/dev/null 2>&1; then
-        echo "  Browser:   ws://localhost:3000 (Docker)"
+    if ! curl -sf http://localhost:3001 >/dev/null 2>&1; then
+        echo "  Browser:   ws://localhost:3001 (Docker)"
         docker compose up -d --build 2>&1 | tail -3
         DOCKER_STARTED=true
         # Wait for browser to be ready
         for i in $(seq 1 30); do
-            curl -sf http://localhost:3000 >/dev/null 2>&1 && break
+            curl -sf http://localhost:3001 >/dev/null 2>&1 && break
             sleep 1
         done
     else
-        echo "  Browser:   ws://localhost:3000 (already running)"
+        echo "  Browser:   ws://localhost:3001 (already running)"
     fi
 elif [ -n "${BROWSER_WS_ENDPOINT:-}" ]; then
     echo "  Warning: BROWSER_WS_ENDPOINT set but Docker not found — install Docker Desktop"

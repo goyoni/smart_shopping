@@ -2,6 +2,6 @@ services:
   browser:
     build: docker/browser
     ports:
-      - "3000:3000"
+      - "3001:3000"
     restart: unless-stopped
     shm_size: "2gb"
