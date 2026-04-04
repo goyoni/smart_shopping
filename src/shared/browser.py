@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import litellm
 from playwright.async_api import Browser, Page, async_playwright
+from sqlalchemy import select
 
 from src.shared.config import settings
 from opentelemetry import trace as otel_trace
@@ -174,3 +176,167 @@ async def get_page(
     finally:
         await page.close()
         await context.close()
+
+
+# -- Universal consent selectors (tried before LLM fallback) --
+_UNIVERSAL_CONSENT_SELECTORS: list[str] = [
+    "[id*='CookiebotDialogBodyLevelButtonLevelOptinAllowAll']",
+    "button[class*='cookie'][class*='accept']",
+    "button[data-action='accept']",
+    "button:has-text('Accept all')",
+    "button:has-text('Accept')",
+    "button:has-text('Αποδοχή')",  # Greek
+    "button:has-text('הסכמה')",  # Hebrew
+    "button:has-text('אישור')",  # Hebrew
+    "button:has-text('Akzeptieren')",  # German
+    "button:has-text('Tout accepter')",  # French
+    "button:has-text('OK')",
+]
+
+# In-memory cache: domain -> selector (or None if no consent detected)
+_consent_cache: dict[str, str | None] = {}
+
+
+async def _load_cached_selector(domain: str) -> str | None:
+    """Load a previously discovered consent selector from DB."""
+    if domain in _consent_cache:
+        return _consent_cache[domain]
+    try:
+        from src.backend.db.engine import async_session
+        from src.backend.db.models import ConsentSelector
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(ConsentSelector.selector).where(
+                    ConsentSelector.domain == domain
+                )
+            )
+            selector = result.scalar_one_or_none()
+            _consent_cache[domain] = selector
+            return selector
+    except Exception:
+        return None
+
+
+async def _save_selector(domain: str, selector: str, source: str = "universal") -> None:
+    """Save a discovered consent selector to DB."""
+    _consent_cache[domain] = selector
+    try:
+        from src.backend.db.engine import async_session
+        from src.backend.db.models import ConsentSelector
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(ConsentSelector).where(ConsentSelector.domain == domain)
+            )
+            record = result.scalar_one_or_none()
+            if record:
+                record.selector = selector
+                record.source = source
+            else:
+                session.add(ConsentSelector(
+                    domain=domain, selector=selector, source=source,
+                ))
+            await session.commit()
+    except Exception:
+        logger.debug("Failed to save consent selector for %s", domain)
+
+
+async def _discover_consent_via_llm(page: Page, domain: str) -> str | None:
+    """Use LLM to identify the accept button in a consent overlay.
+
+    Extracts the visible overlay HTML and asks the LLM for a CSS selector.
+    Returns the selector string if found, None otherwise.
+    """
+    try:
+        # Extract dialog/overlay HTML (common consent containers)
+        overlay_html = await page.evaluate("""() => {
+            const selectors = [
+                '[class*="consent"]', '[class*="cookie"]', '[class*="gdpr"]',
+                '[id*="consent"]', '[id*="cookie"]', '[id*="gdpr"]',
+                '[role="dialog"]', '[class*="modal"]', '[class*="overlay"]',
+                '[class*="banner"]',
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetHeight > 0) {
+                    return el.outerHTML.substring(0, 3000);
+                }
+            }
+            return null;
+        }""")
+
+        if not overlay_html:
+            return None
+
+        model = settings.scraper_llm_model or settings.llm_model
+        response = await litellm.acompletion(
+            model=model,
+            messages=[
+                {"role": "system", "content": (
+                    "You are a web automation assistant. Given HTML of a cookie/consent banner, "
+                    "return ONLY a CSS selector for the 'Accept All' or 'Accept' button. "
+                    "Return just the selector string, nothing else. "
+                    "If no accept button is found, return 'NONE'."
+                )},
+                {"role": "user", "content": f"Domain: {domain}\n\nHTML:\n{overlay_html}"},
+            ],
+            temperature=0.0,
+        )
+        selector = (response.choices[0].message.content or "").strip()
+        if selector and selector != "NONE" and len(selector) < 200:
+            return selector
+    except Exception:
+        logger.debug("LLM consent discovery failed for %s", domain)
+
+    return None
+
+
+async def dismiss_consent(page: Page, domain: str) -> bool:
+    """Dismiss cookie/consent banners using a multi-stage approach.
+
+    1. Check DB for a cached selector for this domain
+    2. Try universal selectors
+    3. If overlay detected but no button found, use LLM on DOM snapshot
+    4. Save discovered selector to DB for future use
+
+    Returns True if a consent banner was dismissed.
+    """
+    # Stage 1: Try cached selector from DB
+    cached = await _load_cached_selector(domain)
+    if cached:
+        try:
+            btn = page.locator(cached).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(timeout=2000)
+                logger.debug("Dismissed consent on %s using cached selector", domain)
+                return True
+        except Exception:
+            pass
+
+    # Stage 2: Try universal selectors
+    for sel in _UNIVERSAL_CONSENT_SELECTORS:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(timeout=2000)
+                await _save_selector(domain, sel, source="universal")
+                logger.debug("Dismissed consent on %s using universal selector", domain)
+                return True
+        except Exception:
+            continue
+
+    # Stage 3: Use LLM to discover the accept button
+    llm_selector = await _discover_consent_via_llm(page, domain)
+    if llm_selector:
+        try:
+            btn = page.locator(llm_selector).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click(timeout=2000)
+                await _save_selector(domain, llm_selector, source="llm")
+                logger.info("Dismissed consent on %s using LLM-discovered selector: %s", domain, llm_selector)
+                return True
+        except Exception:
+            pass
+
+    return False

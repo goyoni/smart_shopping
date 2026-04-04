@@ -40,6 +40,7 @@ async def _seed_defaults() -> None:
                 market=entry["market"],
                 categories_json=json.dumps(entry["categories"]),
                 source="default",
+                success_rate=0.7,
             )
             session.add(record)
             added += 1

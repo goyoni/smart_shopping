@@ -68,6 +68,26 @@ class ProductCriteriaCache(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class KnownEcommerceDomain(Base):
+    """An ecommerce domain discovered via search results or scraping outcomes."""
+
+    __tablename__ = "known_ecommerce_domains"
+    __table_args__ = (
+        UniqueConstraint("domain", "market", name="uq_ecom_domain_market"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255), index=True)
+    market: Mapped[str] = mapped_column(String(10), index=True)
+    source: Mapped[str] = mapped_column(String(20), default="seed")
+    hit_count: Mapped[int] = mapped_column(Integer, default=1)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class AggregatorSite(Base):
     """A marketplace or price-comparison site for a specific market/category."""
 
@@ -84,3 +104,15 @@ class AggregatorSite(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class ConsentSelector(Base):
+    """A cached CSS selector for dismissing cookie/consent banners on a domain."""
+
+    __tablename__ = "consent_selectors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    selector: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(20), default="universal")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

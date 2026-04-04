@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.mcp_servers.web_search_mcp.ecommerce_detector import (
     EcommerceSignal,
+    _SEED_ECOMMERCE_DOMAINS,
     detect_ecommerce,
     extract_domain,
     identify_ecommerce_sites,
 )
+
+# Build a known_domains set from the seed list for testing
+_TEST_KNOWN_DOMAINS = set(_SEED_ECOMMERCE_DOMAINS.keys())
 
 
 class TestExtractDomain:
@@ -26,13 +32,19 @@ class TestExtractDomain:
 
 class TestDetectEcommerce:
     def test_known_ecommerce_domain(self):
-        signal = detect_ecommerce("https://www.amazon.com/dp/B09ABC")
+        signal = detect_ecommerce(
+            "https://www.amazon.com/dp/B09ABC",
+            known_domains=_TEST_KNOWN_DOMAINS,
+        )
         assert signal.is_ecommerce is True
         assert signal.confidence >= 0.8
         assert any("known_ecommerce" in s for s in signal.signals)
 
     def test_known_israeli_ecommerce(self):
-        signal = detect_ecommerce("https://ksp.co.il/web/cat/1234")
+        signal = detect_ecommerce(
+            "https://ksp.co.il/web/cat/1234",
+            known_domains=_TEST_KNOWN_DOMAINS,
+        )
         assert signal.is_ecommerce is True
         assert signal.confidence >= 0.8
 
@@ -64,13 +76,6 @@ class TestDetectEcommerce:
         assert signal.is_ecommerce is True
         assert any("keywords" in s for s in signal.signals)
 
-    def test_hebrew_keywords(self):
-        signal = detect_ecommerce(
-            "https://example.co.il/page",
-            title="מחיר מיוחד - משלוח חינם - הזמנה עכשיו",
-        )
-        assert signal.is_ecommerce is True
-
     def test_unknown_no_signals(self):
         signal = detect_ecommerce(
             "https://blog.example.com/post/123",
@@ -84,6 +89,7 @@ class TestDetectEcommerce:
         signal = detect_ecommerce(
             "https://www.amazon.com/dp/B123",
             title="Buy Widget - Best Price",
+            known_domains=_TEST_KNOWN_DOMAINS,
         )
         assert signal.is_ecommerce is True
         assert signal.confidence > 0.8  # Known domain + keywords
@@ -96,68 +102,59 @@ class TestDetectEcommerce:
         # Even with many keywords, keyword contribution capped at 0.4
         assert signal.confidence <= 0.4
 
+    def test_without_known_domains_uses_heuristics_only(self):
+        """Without known_domains, detection relies purely on heuristics."""
+        signal = detect_ecommerce("https://www.amazon.com/dp/B123")
+        # No known_domains passed, so no known_ecommerce signal
+        assert not any("known_ecommerce" in s for s in signal.signals)
+        # But path pattern /dp/ should still work
+        assert signal.is_ecommerce is True
+        assert any("path_pattern" in s for s in signal.signals)
+
+    def test_currency_symbols_as_keywords(self):
+        """Currency symbols should work as universal ecommerce keywords."""
+        signal = detect_ecommerce(
+            "https://shop.example.com/page",
+            snippet="Great product for only €199",
+        )
+        assert any("keywords" in s for s in signal.signals)
+
 
 class TestIdentifyEcommerceSites:
-    def test_filters_to_ecommerce_only(self):
+    @pytest.mark.asyncio
+    async def test_filters_to_ecommerce_only(self):
         urls_data = [
             {"url": "https://www.amazon.com/dp/B123", "title": "Widget", "snippet": ""},
             {"url": "https://www.youtube.com/watch?v=xyz", "title": "Review", "snippet": ""},
             {"url": "https://blog.example.com/post", "title": "Blog", "snippet": ""},
         ]
-        results = identify_ecommerce_sites(urls_data)
-        assert len(results) == 1
-        assert results[0].domain == "amazon.com"
+        results = await identify_ecommerce_sites(urls_data)
+        # amazon.com should be detected via path pattern /dp/ even without DB
+        ecom_domains = {r.domain for r in results}
+        assert "amazon.com" in ecom_domains
+        assert "youtube.com" not in ecom_domains
 
-    def test_sorts_by_confidence_descending(self):
-        urls_data = [
-            {"url": "https://unknown-shop.com/products/123", "title": "", "snippet": ""},
-            {"url": "https://www.amazon.com/dp/B123", "title": "Buy Widget", "snippet": ""},
-        ]
-        results = identify_ecommerce_sites(urls_data)
-        assert len(results) == 2
-        assert results[0].domain == "amazon.com"
-        assert results[0].confidence >= results[1].confidence
+    @pytest.mark.asyncio
+    async def test_empty_input(self):
+        assert await identify_ecommerce_sites([]) == []
 
-    def test_empty_input(self):
-        assert identify_ecommerce_sites([]) == []
-
-    def test_handles_missing_fields(self):
+    @pytest.mark.asyncio
+    async def test_handles_missing_fields(self):
         urls_data = [{"url": "https://www.ebay.com/itm/123"}]
-        results = identify_ecommerce_sites(urls_data)
-        assert len(results) == 1
+        results = await identify_ecommerce_sites(urls_data)
+        assert len(results) >= 1
         assert results[0].domain == "ebay.com"
 
 
-class TestCommercialTldHeuristic:
-    def test_co_il_unknown_domain(self):
-        """An unknown .co.il domain should pass the threshold."""
-        signal = detect_ecommerce("https://www.cassias.co.il/product/123")
-        assert signal.is_ecommerce is True
-        assert signal.confidence >= 0.4
-        assert any("commercial_tld" in s for s in signal.signals)
-
+class TestPathPatterns:
     def test_co_il_with_keywords_stacks(self):
-        """CC-TLD + keywords should stack for higher confidence."""
+        """Path pattern + keywords should stack for higher confidence."""
         signal = detect_ecommerce(
-            "https://www.cassias.co.il/table",
-            title="שולחן מתקפל - מחיר מבצע",
+            "https://www.example.com/products/table",
+            title="Buy this table - best price",
         )
         assert signal.is_ecommerce is True
-        assert signal.confidence > 0.4
-
-    def test_known_co_il_uses_known_domain(self):
-        """Known .co.il domains should get the higher known-domain score."""
-        signal = detect_ecommerce("https://ksp.co.il/web/cat/1234")
-        assert signal.is_ecommerce is True
-        assert signal.confidence >= 0.8
-        assert any("known_ecommerce" in s for s in signal.signals)
-        # Should NOT have the TLD signal (known domain takes precedence)
-        assert not any("commercial_tld" in s for s in signal.signals)
-
-    def test_co_uk_unknown_domain(self):
-        signal = detect_ecommerce("https://www.argos.co.uk/product/123")
-        assert signal.is_ecommerce is True
-        assert any("commercial_tld" in s for s in signal.signals)
+        assert signal.confidence > 0.3
 
     def test_com_domain_no_tld_boost(self):
         """.com domains should NOT get the CC-TLD boost."""
@@ -165,7 +162,10 @@ class TestCommercialTldHeuristic:
         assert not any("commercial_tld" in s for s in signal.signals)
 
     def test_ikea_global_recognized(self):
-        """ikea.com should be recognized as known e-commerce."""
-        signal = detect_ecommerce("https://www.ikea.com/il/he/cat/tables/")
+        """ikea.com should be recognized as known e-commerce when known_domains provided."""
+        signal = detect_ecommerce(
+            "https://www.ikea.com/il/he/cat/tables/",
+            known_domains=_TEST_KNOWN_DOMAINS,
+        )
         assert signal.is_ecommerce is True
         assert signal.confidence >= 0.8

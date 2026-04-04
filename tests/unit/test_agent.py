@@ -109,7 +109,7 @@ async def test_main_agent_successful_pipeline():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results) as mock_search,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results) as mock_search,
         patch("src.agents.main_agent.scrape_page", return_value=mock_products) as mock_scrape,
     ):
         mock_ctx = AsyncMock()
@@ -130,7 +130,15 @@ async def test_main_agent_successful_pipeline():
 
 @pytest.mark.asyncio
 async def test_main_agent_no_search_results():
-    with patch("src.agents.main_agent.search_products", return_value=[]):
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_get_browser.return_value = mock_ctx
+
         agent = MainAgent(session_id="test-empty")
         state = await agent.process_query("nonexistent product xyz")
 
@@ -147,7 +155,15 @@ async def test_main_agent_no_ecommerce_sites():
         SearchResult(url="https://www.reddit.com/r/gadgets", title="Discussion", snippet=""),
     ]
 
-    with patch("src.agents.main_agent.search_products", return_value=mock_search_results):
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_get_browser,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_get_browser.return_value = mock_ctx
+
         agent = MainAgent(session_id="test-no-ecom")
         state = await agent.process_query("product review video")
 
@@ -158,12 +174,7 @@ async def test_main_agent_no_ecommerce_sites():
 
 @pytest.mark.asyncio
 async def test_main_agent_browser_error():
-    mock_search_results = [
-        SearchResult(url="https://www.amazon.com/dp/B1", title="Product A", snippet=""),
-    ]
-
     with (
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
     ):
         mock_ctx = AsyncMock()
@@ -203,7 +214,7 @@ async def test_main_agent_scrape_site_error_continues():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=mock_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -226,7 +237,15 @@ async def test_main_agent_status_callback():
     async def callback(session_id: str, message: str) -> None:
         received.append((session_id, message))
 
-    with patch("src.agents.main_agent.search_products", return_value=[]):
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_gb,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+    ):
+        _ctx = AsyncMock()
+        _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        _ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_gb.return_value = _ctx
+
         agent = MainAgent(session_id="cb-test", status_callback=callback)
         await agent.process_query("test query")
 
@@ -237,7 +256,15 @@ async def test_main_agent_status_callback():
 
 @pytest.mark.asyncio
 async def test_main_agent_refine_search():
-    with patch("src.agents.main_agent.search_products", return_value=[]):
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_gb,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+    ):
+        _ctx = AsyncMock()
+        _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        _ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_gb.return_value = _ctx
+
         agent = MainAgent(session_id="test-123")
         await agent.process_query("refrigerator")
 
@@ -266,7 +293,7 @@ async def test_pipeline_calls_aggregate_and_format():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", return_value=mock_products),
         patch("src.agents.main_agent.aggregate_sellers", wraps=lambda x: x) as mock_agg,
         patch("src.agents.main_agent.format_results") as mock_fmt,
@@ -309,7 +336,7 @@ async def test_pipeline_passes_locale_to_scraper():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -326,7 +353,15 @@ async def test_pipeline_passes_locale_to_scraper():
 @pytest.mark.asyncio
 async def test_pipeline_extracts_category():
     """Verify category is extracted and criteria are looked up."""
-    with patch("src.agents.main_agent.search_products", return_value=[]):
+    with (
+        patch("src.agents.main_agent.get_browser") as mock_gb,
+        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+    ):
+        _ctx = AsyncMock()
+        _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        _ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_gb.return_value = _ctx
+
         agent = MainAgent(session_id="test-cat")
         state = await agent.process_query("quiet refrigerator")
 
@@ -351,7 +386,7 @@ async def test_pipeline_passes_criteria_to_scraper():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -392,7 +427,7 @@ async def test_pipeline_extracts_query_attributes():
 
     search_kwargs: dict = {}
 
-    async def capture_search(query, language="en", market="us", *, refined_query=None, _max_attempts=2):
+    async def capture_search(browser, query, language="en", market="us", *, refined_query=None):
         search_kwargs["refined_query"] = refined_query
         return mock_search_results
 
@@ -405,7 +440,7 @@ async def test_pipeline_extracts_query_attributes():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", side_effect=capture_search),
+        patch("src.agents.main_agent.search_products_via_browser", side_effect=capture_search),
         patch("src.agents.main_agent.scrape_page", return_value=mock_products),
         patch("src.agents.main_agent.format_results", side_effect=capture_format),
     ):
@@ -445,7 +480,7 @@ async def test_pipeline_boosts_criteria_importance():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -466,16 +501,22 @@ async def test_pipeline_no_attributes_no_refined_query():
     """When no attributes are found, search should use original query."""
     search_kwargs: dict = {}
 
-    async def capture_search(query, language="en", market="us", *, refined_query=None, _max_attempts=2):
+    async def capture_search(browser, query, language="en", market="us", *, refined_query=None):
         search_kwargs["refined_query"] = refined_query
         return []
 
     with (
-        patch("src.agents.main_agent.search_products", side_effect=capture_search),
+        patch("src.agents.main_agent.get_browser") as mock_gb,
+        patch("src.agents.main_agent.search_products_via_browser", side_effect=capture_search),
         patch("src.agents.main_agent.discover_criteria_via_llm", return_value={}),
         patch("src.agents.main_agent.extract_query_attributes_via_llm", return_value=[]),
         patch("src.agents.main_agent.get_cached", return_value=None),
     ):
+        _ctx = AsyncMock()
+        _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        _ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_gb.return_value = _ctx
+
         agent = MainAgent(session_id="test-no-attrs")
         await agent.process_query("best deal on shoes")
 

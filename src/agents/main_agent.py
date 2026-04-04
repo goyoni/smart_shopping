@@ -33,13 +33,18 @@ from src.mcp_servers.results_processor_mcp.processor import (
     format_results,
     validate_results,
 )
-from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
+from src.mcp_servers.web_search_mcp.ecommerce_detector import (
+    identify_ecommerce_sites,
+    record_domain_success,
+)
+from src.mcp_servers.web_search_mcp.aggregator_db import update_aggregator_success
 from src.mcp_servers.web_search_mcp.search import (
     build_refined_query,
     discover_aggregators,
     get_aggregator_urls,
     search_on_site,
     search_products,
+    search_products_via_browser,
 )
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.shared.browser import get_browser
@@ -51,7 +56,7 @@ _tracer = get_tracer(__name__)
 
 StatusCallback = Callable[[str, str], Awaitable[None]]
 
-_MAX_SITES_TO_SCRAPE = 5
+_MAX_SITES_TO_SCRAPE = 8
 
 
 def extract_category(query: str) -> str | None:
@@ -283,7 +288,7 @@ class MainAgent:
                                 "importance": "high",
                             }
 
-                # Step 3: Web search (HTTP-based, no browser)
+                # Step 3: Web search (browser-based Google + DDG fallback)
                 await self._add_status("Searching the web...")
                 refined = None
                 if attributes or category:
@@ -295,89 +300,93 @@ class MainAgent:
                         "attribute_count": len(attributes),
                         "summary": f"Query refined: '{query}' -> '{refined}'" if refined != query else f"Query unchanged: '{query}'",
                     })
-                with operation_span(
-                    _tracer, "search_web",
-                    input=query,
-                    language=language, market=market,
-                ) as search_op:
-                    if refined:
-                        search_op.set_attribute("refined_query", refined)
-                    search_results = await search_products(query, language, market, refined_query=refined)
-                    search_op.set_attribute("result_count", len(search_results))
-                    search_op.set_attribute(
-                        "output",
-                        json.dumps(
-                            [{"url": r.url, "title": r.title} for r in search_results],
-                            ensure_ascii=False,
-                        ) if search_results else "[]",
-                    )
 
-                # Enrich criteria from search snippets
-                if category and search_results:
-                    snippets = [r.snippet for r in search_results if r.snippet]
-                    if snippets:
-                        criteria = research_criteria(snippets, criteria)
-
-                # LLM enrichment from snippets when criteria is still empty
-                if not criteria and search_results:
-                    snippets = [r.snippet for r in search_results if r.snippet]
-                    if snippets:
-                        criteria = await discover_criteria_via_llm(cache_key, snippets=snippets)
-                        if criteria:
-                            await save_cached(cache_key, criteria)
-
-                if not search_results:
-                    root_span.set_attribute("exit_reason", "no_search_results")
-                    root_span.set_attribute("output", json.dumps({"exit_reason": "no_search_results"}))
-                    await self._add_status("No search results found")
-                    self.state.status = SearchStatus.COMPLETED
-                    return self.state
-
-                # Step 4: Identify e-commerce sites
-                await self._add_status(f"Analyzing {len(search_results)} results...")
-                with operation_span(
-                    _tracer, "detect_ecommerce",
-                    input=json.dumps([r.url for r in search_results]),
-                    result_count=len(search_results),
-                ) as ecom_op:
-                    urls_data = [
-                        {"url": r.url, "title": r.title, "snippet": r.snippet}
-                        for r in search_results
-                    ]
-                    ecommerce_signals = identify_ecommerce_sites(urls_data, market=market)
-                    ecom_op.set_attribute("ecommerce_count", len(ecommerce_signals))
-                    ecom_op.set_attribute(
-                        "output",
-                        json.dumps(
-                            [
-                                {"domain": s.domain, "url": s.url, "confidence": s.confidence}
-                                for s in ecommerce_signals
-                            ],
-                            ensure_ascii=False,
-                        ) if ecommerce_signals else "[]",
-                    )
-
-                if not ecommerce_signals:
-                    root_span.set_attribute("exit_reason", "no_ecommerce_sites")
-                    root_span.set_attribute("output", json.dumps({"exit_reason": "no_ecommerce_sites"}))
-                    root_span.set_attribute("summary", f"Pipeline stopped: {len(search_results)} search results but 0 classified as ecommerce")
-                    await self._add_status("No e-commerce sites found in results")
-                    self.state.status = SearchStatus.COMPLETED
-                    return self.state
-
-                # Step 5: Scrape top e-commerce sites (browser needed here)
-                sites_to_scrape = ecommerce_signals[:_MAX_SITES_TO_SCRAPE]
-                root_span.add_event("decision.sites_to_scrape", {
-                    "total_ecommerce": len(ecommerce_signals),
-                    "scraping_count": len(sites_to_scrape),
-                    "sites": json.dumps([{"domain": s.domain, "confidence": s.confidence, "signals": s.signals} for s in sites_to_scrape], ensure_ascii=False),
-                    "summary": f"Scraping top {len(sites_to_scrape)}/{len(ecommerce_signals)} ecommerce sites: {', '.join(s.domain for s in sites_to_scrape)}",
-                })
-                await self._add_status(f"Scraping {len(sites_to_scrape)} e-commerce sites...")
-
-                locale = _build_locale(language, market)
-
+                # Open browser early — used for both search and scraping
                 async with get_browser() as browser:
+                    with operation_span(
+                        _tracer, "search_web",
+                        input=query,
+                        language=language, market=market,
+                    ) as search_op:
+                        if refined:
+                            search_op.set_attribute("refined_query", refined)
+                        search_results = await search_products_via_browser(
+                            browser, query, language, market, refined_query=refined,
+                        )
+                        search_op.set_attribute("result_count", len(search_results))
+                        search_op.set_attribute(
+                            "output",
+                            json.dumps(
+                                [{"url": r.url, "title": r.title} for r in search_results],
+                                ensure_ascii=False,
+                            ) if search_results else "[]",
+                        )
+
+                    # Enrich criteria from search snippets
+                    if category and search_results:
+                        snippets = [r.snippet for r in search_results if r.snippet]
+                        if snippets:
+                            criteria = research_criteria(snippets, criteria)
+
+                    # LLM enrichment from snippets when criteria is still empty
+                    if not criteria and search_results:
+                        snippets = [r.snippet for r in search_results if r.snippet]
+                        if snippets:
+                            criteria = await discover_criteria_via_llm(cache_key, snippets=snippets)
+                            if criteria:
+                                await save_cached(cache_key, criteria)
+
+                    if not search_results:
+                        root_span.set_attribute("exit_reason", "no_search_results")
+                        root_span.set_attribute("output", json.dumps({"exit_reason": "no_search_results"}))
+                        await self._add_status("No search results found")
+                        self.state.status = SearchStatus.COMPLETED
+                        return self.state
+
+                    # Step 4: Identify e-commerce sites
+                    await self._add_status(f"Analyzing {len(search_results)} results...")
+                    with operation_span(
+                        _tracer, "detect_ecommerce",
+                        input=json.dumps([r.url for r in search_results]),
+                        result_count=len(search_results),
+                    ) as ecom_op:
+                        urls_data = [
+                            {"url": r.url, "title": r.title, "snippet": r.snippet}
+                            for r in search_results
+                        ]
+                        ecommerce_signals = await identify_ecommerce_sites(urls_data, market=market)
+                        ecom_op.set_attribute("ecommerce_count", len(ecommerce_signals))
+                        ecom_op.set_attribute(
+                            "output",
+                            json.dumps(
+                                [
+                                    {"domain": s.domain, "url": s.url, "confidence": s.confidence}
+                                    for s in ecommerce_signals
+                                ],
+                                ensure_ascii=False,
+                            ) if ecommerce_signals else "[]",
+                        )
+
+                    if not ecommerce_signals:
+                        root_span.set_attribute("exit_reason", "no_ecommerce_sites")
+                        root_span.set_attribute("output", json.dumps({"exit_reason": "no_ecommerce_sites"}))
+                        root_span.set_attribute("summary", f"Pipeline stopped: {len(search_results)} search results but 0 classified as ecommerce")
+                        await self._add_status("No e-commerce sites found in results")
+                        self.state.status = SearchStatus.COMPLETED
+                        return self.state
+
+                    # Step 5: Scrape top e-commerce sites
+                    sites_to_scrape = ecommerce_signals[:_MAX_SITES_TO_SCRAPE]
+                    root_span.add_event("decision.sites_to_scrape", {
+                        "total_ecommerce": len(ecommerce_signals),
+                        "scraping_count": len(sites_to_scrape),
+                        "sites": json.dumps([{"domain": s.domain, "confidence": s.confidence, "signals": s.signals} for s in sites_to_scrape], ensure_ascii=False),
+                        "summary": f"Scraping top {len(sites_to_scrape)}/{len(ecommerce_signals)} ecommerce sites: {', '.join(s.domain for s in sites_to_scrape)}",
+                    })
+                    await self._add_status(f"Scraping {len(sites_to_scrape)} e-commerce sites...")
+
+                    locale = _build_locale(language, market)
+
                     with operation_span(
                         _tracer, "scrape_sites",
                         input=json.dumps(
@@ -558,6 +567,7 @@ class MainAgent:
             browser: object,
             urls: list[str],
             model_id: str,
+            aggregator_domains: set[str] | None = None,
         ) -> list[ProductResult]:
             """Scrape a list of URLs and return products relevant to model_id."""
             from urllib.parse import urlparse as _urlparse
@@ -638,6 +648,20 @@ class MainAgent:
 
                         products.extend(relevant)
 
+                        # Track scrape outcomes for learning
+                        has_priced = any(
+                            s.price is not None
+                            for p in relevant for s in (p.sellers or [])
+                        )
+                        if aggregator_domains and domain in aggregator_domains:
+                            asyncio.ensure_future(
+                                update_aggregator_success(domain, market, success=has_priced)
+                            )
+                        if has_priced:
+                            asyncio.ensure_future(
+                                record_domain_success(domain, market)
+                            )
+
                         site_op.set_attribute("output", json.dumps({
                             "url": url,
                             "model_id": model_id,
@@ -664,27 +688,56 @@ class MainAgent:
         # Try to detect category from query context for aggregator filtering
         category = extract_category(self.state.query)
 
-        # ------------------------------------------------------------------
-        # Phase 1: Search for each model (web search + aggregators)
-        # ------------------------------------------------------------------
-        with operation_span(
-            _tracer, "search_models",
-            input=json.dumps(model_ids),
-            model_count=len(model_ids),
-        ) as search_op:
-            async def search_single_model(model_id: str) -> list[str]:
-                """Return a list of URLs to scrape for a given model ID."""
-                await self._add_status(f"Searching for {model_id}...")
-                with operation_span(
-                    _tracer, f"search_model:{model_id}",
-                    input=json.dumps({"model_id": model_id, "market": market}),
-                ) as model_op:
-                    results = await search_products(model_id, language, market)
+        # Open browser once for both search and scrape phases
+        async with get_browser() as browser:
+
+            # ------------------------------------------------------------------
+            # Phase 1: Search for each model (web search + aggregators)
+            # ------------------------------------------------------------------
+            with operation_span(
+                _tracer, "search_models",
+                input=json.dumps(model_ids),
+                model_count=len(model_ids),
+            ) as search_op:
+                async def search_single_model(model_id: str) -> tuple[list[str], set[str]]:
+                    """Return (URLs to scrape, aggregator domains) for a model ID."""
+                    await self._add_status(f"Searching for {model_id}...")
+                    with operation_span(
+                        _tracer, f"search_model:{model_id}",
+                        input=json.dumps({"model_id": model_id, "market": market}),
+                    ) as model_op:
+                        # Dual-source: browser (Google) + HTTP (DDG) in parallel
+                        browser_task = search_products_via_browser(
+                            browser, model_id, language, market,
+                        )
+                        ddg_task = search_products(model_id, language, market)
+                        browser_results, ddg_results = await asyncio.gather(
+                            browser_task, ddg_task, return_exceptions=True,
+                        )
+
+                        # Merge results: browser first, then DDG, dedup by URL
+                        results = []
+                        seen_urls: set[str] = set()
+                        for source in (browser_results, ddg_results):
+                            if isinstance(source, Exception):
+                                logger.warning("Search source failed for %s: %s", model_id, source)
+                                continue
+                            for r in source:
+                                if r.url not in seen_urls:
+                                    seen_urls.add(r.url)
+                                    results.append(r)
+
+                        model_op.set_attribute("browser_result_count",
+                            len(browser_results) if not isinstance(browser_results, Exception) else 0)
+                        model_op.set_attribute("ddg_result_count",
+                            len(ddg_results) if not isinstance(ddg_results, Exception) else 0)
+                        model_op.set_attribute("merged_result_count", len(results))
+
                     ecom_data = [
                         {"url": r.url, "title": r.title, "snippet": r.snippet}
                         for r in results
                     ]
-                    ecom_signals = identify_ecommerce_sites(ecom_data, market=market)
+                    ecom_signals = await identify_ecommerce_sites(ecom_data, market=market)
 
                     urls = [s.url for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]]
 
@@ -717,20 +770,33 @@ class MainAgent:
                         "total_urls_to_scrape": len(urls),
                     }, ensure_ascii=False))
 
-                    return urls
+                    agg_domains = set(e["domain"] for e in aggregator_entries)
+                    return urls, agg_domains
 
             # Discover new aggregators for this market+category (async, non-blocking)
             if category:
                 asyncio.ensure_future(discover_aggregators(market, category))
 
             # Stagger searches to avoid rate-limiting by DuckDuckGo
-            async def _staggered_search(idx: int, mid: str) -> list[str]:
+            async def _staggered_search(idx: int, mid: str) -> tuple[list[str], set[str]]:
                 if idx > 0:
                     await asyncio.sleep(idx * 2.5)
                 return await search_single_model(mid)
 
             search_tasks = [_staggered_search(i, mid) for i, mid in enumerate(model_ids)]
-            urls_per_model = await asyncio.gather(*search_tasks, return_exceptions=True)
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+            # Separate URLs and aggregator domains
+            urls_per_model: list[list[str] | Exception] = []
+            all_aggregator_domains: set[str] = set()
+            for result in search_results:
+                if isinstance(result, Exception):
+                    urls_per_model.append(result)
+                else:
+                    urls, agg_domains = result
+                    urls_per_model.append(urls)
+                    all_aggregator_domains.update(agg_domains)
+
             search_op.set_attribute("output", json.dumps({
                 "models_searched": len(model_ids),
                 "urls_found": sum(
@@ -738,13 +804,12 @@ class MainAgent:
                 ),
             }))
 
-        # ------------------------------------------------------------------
-        # Phase 2: Scrape all URLs in parallel per model
-        # ------------------------------------------------------------------
-        await self._add_status("Scraping product pages...")
-        all_products: list[ProductResult] = []
+            # ------------------------------------------------------------------
+            # Phase 2: Scrape all URLs in parallel per model
+            # ------------------------------------------------------------------
+            await self._add_status("Scraping product pages...")
+            all_products: list[ProductResult] = []
 
-        async with get_browser() as browser:
             with operation_span(
                 _tracer, "scrape_models",
                 input=json.dumps(model_ids),
@@ -756,7 +821,7 @@ class MainAgent:
                         logger.warning("Search failed for %s: %s", mid, urls_result)
                         continue
                     if urls_result:
-                        scrape_tasks.append(_scrape_urls(browser, urls_result, mid))
+                        scrape_tasks.append(_scrape_urls(browser, urls_result, mid, all_aggregator_domains))
                         scrape_model_ids.append(mid)
 
                 if scrape_tasks:

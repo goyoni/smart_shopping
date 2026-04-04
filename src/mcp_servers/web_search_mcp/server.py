@@ -62,7 +62,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "identify_ecommerce_sites":
         urls_data = arguments["urls"]
-        signals = identify_ecommerce_sites(urls_data)
+        signals = await identify_ecommerce_sites(urls_data)
         ecommerce_urls = [
             {"url": s.url, "domain": s.domain, "confidence": s.confidence, "signals": s.signals}
             for s in signals

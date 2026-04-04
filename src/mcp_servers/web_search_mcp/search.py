@@ -448,13 +448,10 @@ async def search_products_via_browser(
             await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
 
             # Accept Google consent if prompted
-            try:
-                consent_btn = page.locator("button:has-text('Accept'), button:has-text('הסכמה'), button:has-text('אישור')")
-                if await consent_btn.count() > 0:
-                    await consent_btn.first.click()
-                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
-            except Exception:
-                pass
+            from src.shared.browser import dismiss_consent
+            google_domain_name = google_domain.replace("www.", "")
+            if await dismiss_consent(page, google_domain_name):
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
 
             # Extract search result links
             results: list[SearchResult] = []
@@ -505,12 +502,62 @@ async def search_products_via_browser(
                 except Exception:
                     continue
 
+            # Extract Google Shopping results (product cards with prices)
+            shopping_count = 0
+            try:
+                shopping_cards = page.locator("[data-docid], .sh-dgr__content, .commercial-unit-desktop-top a[href*='/shopping/']")
+                card_count = await shopping_cards.count()
+                for i in range(min(card_count, 20)):
+                    try:
+                        card = shopping_cards.nth(i)
+                        card_anchor = card.locator("a[href]").first
+                        if await card_anchor.count() == 0:
+                            # The card itself might be the anchor
+                            card_anchor = card if await card.get_attribute("href") else None
+                            if not card_anchor:
+                                continue
+
+                        href = await card_anchor.get_attribute("href") or ""
+                        if not href or href in seen_urls:
+                            continue
+
+                        # Resolve Google redirect URLs
+                        if "/url?" in href and "q=" in href:
+                            from urllib.parse import parse_qs
+                            parsed_href = urlparse(href)
+                            qs = parse_qs(parsed_href.query)
+                            actual = qs.get("q", [""])[0] or qs.get("url", [""])[0]
+                            if actual:
+                                href = actual
+
+                        parsed_href = urlparse(href)
+                        host = parsed_href.hostname or ""
+                        if any(g in host for g in ("google.", "gstatic.", "googleapis.")):
+                            continue
+                        if not parsed_href.scheme or parsed_href.scheme not in ("http", "https"):
+                            continue
+
+                        seen_urls.add(href)
+                        title = (await card.inner_text()).strip()[:200]
+                        results.append(SearchResult(
+                            url=href,
+                            title=f"[Shopping] {title}" if title else "[Shopping result]",
+                            snippet="",
+                        ))
+                        shopping_count += 1
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
             span.set_attribute("browser_result_count", len(results))
-            logger.info("Browser search found %d results for '%s'", len(results), query)
+            span.set_attribute("shopping_result_count", shopping_count)
+            logger.info("Browser search found %d results (%d shopping) for '%s'",
+                       len(results), shopping_count, query)
 
             if results:
                 span.set_attribute("summary",
-                    f"Browser search on {google_domain} found {len(results)} results")
+                    f"Browser search on {google_domain} found {len(results)} results ({shopping_count} shopping)")
                 return results
 
     except Exception as exc:

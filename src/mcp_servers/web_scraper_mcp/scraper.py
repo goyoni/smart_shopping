@@ -581,7 +581,8 @@ async def _attempt_playwright(
         if nav_error:
             return nav_error
 
-        await _dismiss_cookie_banner(page, domain)
+        from src.shared.browser import dismiss_consent
+        await dismiss_consent(page, domain)
         await _wait_for_content(page)
 
         is_listing = page_type in ("search", "catalog")
@@ -700,26 +701,6 @@ async def _playwright_navigate(
 
     return None
 
-
-async def _dismiss_cookie_banner(page: object, domain: str) -> None:
-    """Dismiss cookie consent banners."""
-    try:
-        consent_selectors = [
-            "[id*='CookiebotDialogBodyLevelButtonLevelOptinAllowAll']",
-            "button[class*='cookie'][class*='accept']",
-            "button[data-action='accept']",
-            "button:has-text('Accept all')",
-            "button:has-text('Accept')",
-            "button:has-text('OK')",
-        ]
-        for sel in consent_selectors:
-            btn = page.locator(sel).first
-            if await btn.count() > 0 and await btn.is_visible():
-                await btn.click(timeout=2000)
-                _pipeline_event(domain, "playwright", "dismissed cookie consent banner")
-                break
-    except Exception:
-        pass
 
 
 async def _wait_for_content(page: object) -> None:

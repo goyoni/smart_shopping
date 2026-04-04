@@ -1,41 +1,46 @@
-"""E-commerce site detection and classification."""
+"""E-commerce site detection and classification.
+
+Uses a combination of:
+- DB-backed known domains (seeded from defaults, grows via search results and scrape outcomes)
+- URL path patterns
+- Universal ecommerce keywords (language-agnostic where possible)
+- Market TLD matching
+"""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from opentelemetry import trace as otel_trace
+from sqlalchemy import select
 
 from src.shared.logging import get_logger
 from src.shared.market_config import get_market_tld, get_marketplace_domain_map
 
 logger = get_logger(__name__)
 
-_KNOWN_ECOMMERCE_DOMAINS: set[str] = {
-    # Global
-    "amazon.com", "amazon.co.uk", "amazon.de", "amazon.fr",
-    "ebay.com", "ebay.co.uk", "ebay.de",
-    "aliexpress.com", "walmart.com", "target.com",
-    "bestbuy.com", "newegg.com", "etsy.com",
-    "ikea.com",
+# Seed domains — loaded into DB on first access, then DB is authoritative.
+_SEED_ECOMMERCE_DOMAINS: dict[str, str] = {
+    # Global (market="global")
+    "amazon.com": "global", "amazon.co.uk": "global", "amazon.de": "global",
+    "amazon.fr": "global", "ebay.com": "global", "ebay.co.uk": "global",
+    "ebay.de": "global", "aliexpress.com": "global", "walmart.com": "global",
+    "target.com": "global", "bestbuy.com": "global", "newegg.com": "global",
+    "etsy.com": "global", "ikea.com": "global",
     # Israel
-    "zap.co.il", "ksp.co.il", "bug.co.il", "ivory.co.il",
-    "lastprice.co.il", "wisebuy.co.il", "machsanei-hashmal.co.il",
-    "next.co.il", "shufersal.co.il", "homecenter.co.il",
-    "ace.co.il", "hamashbir.co.il", "terminal-x.com",
-    "mega.co.il", "rami-levy.co.il",
+    "zap.co.il": "il", "ksp.co.il": "il", "bug.co.il": "il",
+    "ivory.co.il": "il", "lastprice.co.il": "il", "wisebuy.co.il": "il",
+    "machsanei-hashmal.co.il": "il", "next.co.il": "il",
+    "shufersal.co.il": "il", "homecenter.co.il": "il",
+    "ace.co.il": "il", "hamashbir.co.il": "il", "terminal-x.com": "il",
+    "mega.co.il": "il", "rami-levy.co.il": "il",
     # Germany
-    "otto.de", "mediamarkt.de", "saturn.de",
+    "otto.de": "de", "mediamarkt.de": "de", "saturn.de": "de",
     # France
-    "fnac.com", "cdiscount.com", "darty.com",
-}
-
-# Country-code commercial TLDs that are *almost always* e-commerce or
-# business sites.  A site using one of these suffixes gets a moderate
-# confidence boost even if it is not in the known-domain list.
-_COMMERCIAL_CC_TLDS: set[str] = {
-    ".co.il", ".co.uk", ".com.au", ".com.br", ".co.jp",
+    "fnac.com": "fr", "cdiscount.com": "fr", "darty.com": "fr",
 }
 
 _NON_ECOMMERCE_DOMAINS: set[str] = {
@@ -53,20 +58,163 @@ _ECOMMERCE_PATH_PATTERNS: list[str] = [
     "/collections/", "/listing/",
 ]
 
-_ECOMMERCE_KEYWORDS_EN: list[str] = [
+# Universal ecommerce keywords — work across languages via common patterns
+# found in URLs, structured data, and page content.
+_ECOMMERCE_KEYWORDS: list[str] = [
+    # English (lingua franca of the web)
     "price", "buy", "shop", "add to cart", "in stock",
     "free shipping", "delivery", "order",
+    # Common patterns that appear in any language (currency symbols, numbers)
+    "€", "$", "₪", "£", "¥",
 ]
 
-_ECOMMERCE_KEYWORDS_HE: list[str] = [
-    "מחיר", "קנה", "קנייה", "חנות", "הוסף לסל",
-    "משלוח", "הזמנה", "במלאי",
-]
 
-_ECOMMERCE_KEYWORDS_AR: list[str] = [
-    "سعر", "شراء", "متجر", "أضف إلى السلة",
-    "شحن", "طلب",
-]
+# -- In-memory cache for DB-backed known domains --
+_known_domains_cache: dict[str, set[str]] = {}  # market -> set of domains
+_cache_timestamp: float = 0.0
+_CACHE_TTL = 300.0  # 5 minutes
+_seeded = False
+
+
+def _reset_cache() -> None:
+    """Reset module-level caches (for testing)."""
+    global _seeded, _known_domains_cache, _cache_timestamp
+    _seeded = False
+    _known_domains_cache.clear()
+    _cache_timestamp = 0.0
+
+
+async def _seed_known_domains() -> None:
+    """Seed the DB with default known ecommerce domains (once)."""
+    global _seeded
+    if _seeded:
+        return
+    _seeded = True
+
+    from src.backend.db.engine import async_session
+    from src.backend.db.models import KnownEcommerceDomain
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(KnownEcommerceDomain.domain).limit(1)
+        )
+        if result.scalar_one_or_none() is not None:
+            return  # Already seeded
+
+        for domain, market in _SEED_ECOMMERCE_DOMAINS.items():
+            session.add(KnownEcommerceDomain(
+                domain=domain,
+                market=market,
+                source="seed",
+                hit_count=10,  # High initial count so seeds are always trusted
+                success_count=5,
+            ))
+        await session.commit()
+        logger.info("Seeded %d known ecommerce domains", len(_SEED_ECOMMERCE_DOMAINS))
+
+
+async def _load_known_domains(market: str | None = None) -> set[str]:
+    """Load known ecommerce domains from DB (cached in memory).
+
+    Falls back to seed domains if the DB is unavailable.
+    """
+    global _known_domains_cache, _cache_timestamp
+
+    now = time.monotonic()
+    cache_key = market or "__all__"
+    if cache_key in _known_domains_cache and (now - _cache_timestamp) < _CACHE_TTL:
+        return _known_domains_cache[cache_key]
+
+    try:
+        await _seed_known_domains()
+
+        from src.backend.db.engine import async_session
+        from src.backend.db.models import KnownEcommerceDomain
+
+        async with async_session() as session:
+            stmt = select(KnownEcommerceDomain.domain).where(
+                # Domains with hit_count >= 2 or success_count >= 1 are trusted
+                (KnownEcommerceDomain.hit_count >= 2) | (KnownEcommerceDomain.success_count >= 1)
+            )
+            if market:
+                # Include both market-specific and global domains
+                stmt = stmt.where(
+                    KnownEcommerceDomain.market.in_([market, "global"])
+                )
+            result = await session.execute(stmt)
+            domains = {row[0] for row in result.all()}
+    except Exception:
+        logger.debug("DB unavailable for known domains, using seed list")
+        domains = set(_SEED_ECOMMERCE_DOMAINS.keys())
+
+    _known_domains_cache[cache_key] = domains
+    _cache_timestamp = now
+    return domains
+
+
+async def record_domain_hit(domain: str, market: str, source: str = "search") -> None:
+    """Record that a domain was seen in search results for a market.
+
+    Increments hit_count if it exists, otherwise creates a new entry.
+    """
+    try:
+        from src.backend.db.engine import async_session
+        from src.backend.db.models import KnownEcommerceDomain
+
+        async with async_session() as session:
+            stmt = select(KnownEcommerceDomain).where(
+                KnownEcommerceDomain.domain == domain,
+                KnownEcommerceDomain.market == market,
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+
+            if record:
+                record.hit_count += 1
+                if source != "search":
+                    record.source = source
+            else:
+                session.add(KnownEcommerceDomain(
+                    domain=domain,
+                    market=market,
+                    source=source,
+                    hit_count=1,
+                    success_count=0,
+                ))
+            await session.commit()
+    except Exception:
+        logger.debug("Failed to record domain hit for %s", domain)
+
+
+async def record_domain_success(domain: str, market: str) -> None:
+    """Record that a domain yielded priced products (scrape success)."""
+    try:
+        from src.backend.db.engine import async_session
+        from src.backend.db.models import KnownEcommerceDomain
+
+        async with async_session() as session:
+            stmt = select(KnownEcommerceDomain).where(
+                KnownEcommerceDomain.domain == domain,
+                KnownEcommerceDomain.market == market,
+            )
+            result = await session.execute(stmt)
+            record = result.scalar_one_or_none()
+
+            if record:
+                record.success_count += 1
+                await session.commit()
+            else:
+                # Domain not yet tracked — create with a success
+                session.add(KnownEcommerceDomain(
+                    domain=domain,
+                    market=market,
+                    source="scrape",
+                    hit_count=1,
+                    success_count=1,
+                ))
+                await session.commit()
+    except Exception:
+        logger.debug("Failed to record domain success for %s", domain)
 
 
 @dataclass
@@ -87,8 +235,17 @@ def extract_domain(url: str) -> str:
     return domain
 
 
-def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceSignal:
+def detect_ecommerce(
+    url: str,
+    title: str = "",
+    snippet: str = "",
+    known_domains: set[str] | None = None,
+) -> EcommerceSignal:
     """Score a URL for e-commerce likelihood using multiple signals.
+
+    Args:
+        known_domains: Pre-loaded set of known ecommerce domains from DB.
+            If None, only heuristic signals are used.
 
     Returns an EcommerceSignal with confidence score and contributing signals.
     Threshold for is_ecommerce: 0.3
@@ -105,19 +262,12 @@ def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceS
                 confidence=0.0, signals=["known_non_ecommerce"],
             )
 
-    # Known e-commerce domain
-    for ec_domain in _KNOWN_ECOMMERCE_DOMAINS:
-        if domain == ec_domain or domain.endswith(f".{ec_domain}"):
-            confidence += 0.8
-            signals.append(f"known_ecommerce:{ec_domain}")
-            break
-
-    # Commercial country-code TLD heuristic (e.g. .co.il, .co.uk)
-    if not signals:  # only if not already matched as known domain
-        for tld in _COMMERCIAL_CC_TLDS:
-            if domain.endswith(tld):
-                confidence += 0.4
-                signals.append(f"commercial_tld:{tld}")
+    # Known e-commerce domain (from DB)
+    if known_domains:
+        for ec_domain in known_domains:
+            if domain == ec_domain or domain.endswith(f".{ec_domain}"):
+                confidence += 0.8
+                signals.append(f"known_ecommerce:{ec_domain}")
                 break
 
     # URL path patterns
@@ -131,11 +281,9 @@ def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceS
     # Keyword analysis in title and snippet
     combined_text = f"{title} {snippet}".lower()
     keyword_score = 0.0
-
-    all_keywords = _ECOMMERCE_KEYWORDS_EN + _ECOMMERCE_KEYWORDS_HE + _ECOMMERCE_KEYWORDS_AR
     matched_keywords: list[str] = []
 
-    for keyword in all_keywords:
+    for keyword in _ECOMMERCE_KEYWORDS:
         if keyword in combined_text:
             keyword_score += 0.1
             matched_keywords.append(keyword)
@@ -154,21 +302,24 @@ def detect_ecommerce(url: str, title: str = "", snippet: str = "") -> EcommerceS
     )
 
 
-def identify_ecommerce_sites(
+async def identify_ecommerce_sites(
     urls_data: list[dict[str, str]],
     market: str | None = None,
 ) -> list[EcommerceSignal]:
     """Filter and sort URLs by e-commerce confidence.
 
+    Loads known domains from DB, then applies heuristic scoring.
+    After classification, records hits for ecommerce domains.
+
     Args:
         urls_data: List of dicts with 'url', optionally 'title' and 'snippet'.
-        market: Target market code (e.g. 'il'). When provided,
-            country-specific marketplace variants (Amazon.dk, eBay.it, etc.)
-            that don't match the target market are penalized.
+        market: Target market code (e.g. 'il').
 
     Returns:
         E-commerce URLs sorted by confidence descending.
     """
+    known_domains = await _load_known_domains(market)
+
     results: list[EcommerceSignal] = []
     market_tld = get_market_tld(market) if market else None
     marketplace_domains = get_marketplace_domain_map()
@@ -177,7 +328,7 @@ def identify_ecommerce_sites(
         url = item.get("url", "")
         title = item.get("title", "")
         snippet = item.get("snippet", "")
-        signal = detect_ecommerce(url, title, snippet)
+        signal = detect_ecommerce(url, title, snippet, known_domains=known_domains)
         if signal.is_ecommerce:
             # Penalize country-specific marketplace domains that don't match
             # the target market (e.g. amazon.dk when searching in Israel)
@@ -194,6 +345,14 @@ def identify_ecommerce_sites(
 
     results.sort(key=lambda s: s.confidence, reverse=True)
 
+    # Record domain hits in background (learn from search results)
+    if market and results:
+        async def _batch_record_hits() -> None:
+            for signal in results:
+                await record_domain_hit(signal.domain, market)
+
+        asyncio.ensure_future(_batch_record_hits())
+
     # Record summary on current span
     span = otel_trace.get_current_span()
     if span and span.is_recording():
@@ -206,6 +365,7 @@ def identify_ecommerce_sites(
             "rejected_count": len(rejected),
             "top_ecommerce": str(classified),
             "rejected_domains": str(rejected[:10]),
+            "known_domains_count": len(known_domains),
             "summary": f"{len(results)}/{len(urls_data)} URLs classified as ecommerce. Top: {', '.join(s.domain for s in results[:5])}",
         })
 
