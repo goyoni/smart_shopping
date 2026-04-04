@@ -413,7 +413,7 @@ class TestExtractFromDataAttrs:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.soup_methods.get_default_currency_for_domain",
                    return_value="ILS"):
             products = _extract_from_data_attrs(
                 soup, "https://compare.example.com/product/123", "compare.example.com",
@@ -432,7 +432,7 @@ class TestExtractFromDataAttrs:
         from bs4 import BeautifulSoup
         html = '<html><body><div data-product-price="100">one</div></body></html>'
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.soup_methods.get_default_currency_for_domain",
                    return_value="USD"):
             products = _extract_from_data_attrs(soup, "https://x.com", "x.com", "Prod")
         assert len(products) == 1
@@ -449,7 +449,7 @@ class TestExtractFromDataAttrs:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.soup_methods.get_default_currency_for_domain",
                    return_value="USD"):
             products = _extract_from_data_attrs(soup, "https://x.com", "x.com", "Widget")
         # "abc" is unparseable, "0" parses to 0.0, 500 and 600 are valid
@@ -535,7 +535,7 @@ class TestExtractMicrodataFromSoup:
         </body></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.soup_methods.get_default_currency_for_domain",
                    return_value="ILS"):
             result = _extract_microdata_from_soup(soup, "https://x.com/p", "x.com")
         assert result is not None
@@ -626,7 +626,7 @@ class TestExtractOgProductFromSoup:
         </head></html>
         """
         soup = BeautifulSoup(html, "html.parser")
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_default_currency_for_domain",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.soup_methods.get_default_currency_for_domain",
                    return_value="ILS"):
             result = _extract_og_product_from_soup(soup, "https://x.co.il/p", "x.co.il")
         assert result is not None
@@ -741,11 +741,11 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http", return_value=http_result),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright") as mock_pw,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results", return_value=[product]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product", return_value=http_result),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright") as mock_pw,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.validate_results", return_value=[product]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._cache_success"),
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
 
@@ -785,14 +785,14 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   side_effect=[http_fail, curl_fail]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright",
                   return_value=pw_success),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.validate_results",
                   return_value=[product]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._cache_success"),
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
 
@@ -812,10 +812,10 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   return_value=captcha_result),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright") as mock_pw,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright") as mock_pw,
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
 
@@ -850,10 +850,10 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   side_effect=[http_fail, curl_fail]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright",
                   return_value=pw_fail),
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
@@ -898,8 +898,8 @@ class TestScrapePagePipeline:
             return products  # Validation passes
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   side_effect=[
                       http_result,
                       ExtractionResult(access_method="curl_cffi",
@@ -908,11 +908,11 @@ class TestScrapePagePipeline:
                                        domain="shop.example.com",
                                        page_type="search"),
                   ]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright",
                   return_value=pw_result),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.validate_results",
                   side_effect=mock_validate),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._cache_success"),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._cache_success"),
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=laptop")
 
@@ -925,7 +925,7 @@ class TestScrapePagePipeline:
         mock_browser = AsyncMock()
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=True),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.is_domain_blocked", return_value=True),
         ):
             results = await scrape_page(mock_browser, "https://blocked.example.com/search?q=test")
 
@@ -944,9 +944,9 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=False),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.is_domain_blocked", return_value=False),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   return_value=ExtractionResult(
                       access_method="httpx",
                       failure_type=FailureType.HTTP_BLOCKED,
@@ -954,9 +954,9 @@ class TestScrapePagePipeline:
                       domain="shop.example.com",
                       page_type="search",
                   )),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright",
                   return_value=fail_result),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_failure") as mock_update_failure,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.update_failure") as mock_update_failure,
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=test")
 
@@ -996,15 +996,15 @@ class TestScrapePagePipeline:
         )
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.scraper.is_domain_blocked", return_value=False),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.get_cached_strategy", return_value=None),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_http",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.is_domain_blocked", return_value=False),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.get_cached_strategy", return_value=None),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_http_listing_then_product",
                   side_effect=[http_result, fail_http2]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper._attempt_playwright",
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline._attempt_playwright",
                   return_value=fail_pw),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.validate_results", return_value=[]),
-            patch("src.mcp_servers.web_scraper_mcp.scraper.mark_validation_failure") as mock_val,
-            patch("src.mcp_servers.web_scraper_mcp.scraper.update_failure"),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.validate_results", return_value=[]),
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.mark_validation_failure") as mock_val,
+            patch("src.mcp_servers.web_scraper_mcp.scraper.pipeline.update_failure"),
         ):
             results = await scrape_page(mock_browser, "https://shop.example.com/search?q=test")
 
@@ -1069,7 +1069,7 @@ class TestValidateResults:
                 Seller(name="s.com", price=100, currency="USD", url="https://s.com"),
             ]),
         ]
-        with patch("src.mcp_servers.web_scraper_mcp.extractors.get_garbage_names",
+        with patch("src.mcp_servers.web_scraper_mcp.extractors.validation.get_garbage_names",
                    return_value={"Valid Product XYZ"}):
             result = validate_results(products, "", "s.com")
         assert len(result) == 0

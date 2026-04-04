@@ -122,13 +122,13 @@ class TestDetectCurrency:
 
 class TestGetScraperLlmModel:
     def test_defaults_to_llm_model(self):
-        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.model.settings") as mock_settings:
             mock_settings.scraper_llm_model = ""
             mock_settings.llm_model = "gpt-4o-mini"
             assert _get_scraper_llm_model() == "gpt-4o-mini"
 
     def test_override(self):
-        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.model.settings") as mock_settings:
             mock_settings.scraper_llm_model = "ollama/llama3"
             mock_settings.llm_model = "gpt-4o-mini"
             assert _get_scraper_llm_model() == "ollama/llama3"
@@ -160,7 +160,7 @@ class TestDiscoverViaLlm:
     @pytest.mark.asyncio
     async def test_skipped_without_api_key(self):
         page = AsyncMock()
-        with patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings:
+        with patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.settings") as mock_settings:
             mock_settings.llm_api_key = ""
             mock_settings.scraper_llm_model = ""
             mock_settings.llm_model = "gpt-4o-mini"
@@ -181,8 +181,8 @@ class TestDiscoverViaLlm:
         })
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
-            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.litellm") as mock_litellm,
         ):
             mock_settings.llm_api_key = "test-key"
             mock_settings.scraper_llm_model = ""
@@ -203,8 +203,8 @@ class TestDiscoverViaLlm:
         llm_response.choices[0].message.content = "Sorry, I can't do that."
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
-            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.litellm") as mock_litellm,
         ):
             mock_settings.llm_api_key = "test-key"
             mock_settings.scraper_llm_model = ""
@@ -229,8 +229,8 @@ class TestDiscoverViaLlm:
         })
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
-            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.litellm") as mock_litellm,
         ):
             mock_settings.llm_api_key = "test-key"
             mock_settings.scraper_llm_model = ""
@@ -252,12 +252,15 @@ class TestDiscoverViaLlm:
         })
 
         with (
-            patch("src.mcp_servers.web_scraper_mcp.strategy.settings") as mock_settings,
-            patch("src.mcp_servers.web_scraper_mcp.strategy.litellm") as mock_litellm,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.settings") as mock_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.model.settings") as mock_model_settings,
+            patch("src.mcp_servers.web_scraper_mcp.strategy.llm_discovery.litellm") as mock_litellm,
         ):
             mock_settings.llm_api_key = "test-key"
             mock_settings.scraper_llm_model = "ollama/llama3"
             mock_settings.llm_model = "gpt-4o-mini"
+            mock_model_settings.scraper_llm_model = "ollama/llama3"
+            mock_model_settings.llm_model = "gpt-4o-mini"
             mock_litellm.acompletion = AsyncMock(return_value=llm_response)
 
             await _discover_via_llm(mock_page, "pl5147")
