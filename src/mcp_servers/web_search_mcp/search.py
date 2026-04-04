@@ -13,7 +13,7 @@ from curl_cffi.requests import AsyncSession
 from opentelemetry import trace
 
 from src.shared.config import settings
-from src.shared.logging import get_logger, get_tracer
+from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
 from src.shared.market_config import (
     get_buy_online_suffix,
     get_google_domain,
@@ -39,29 +39,44 @@ async def _translate_query(query: str, target_lang: str) -> str | None:
         return None
 
     target_name = get_language_name(target_lang)
-    try:
-        response = await litellm.acompletion(
-            model=settings.llm_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"Translate the following product search query to {target_name}. "
-                        "Return ONLY the translated query, nothing else."
-                    ),
-                },
-                {"role": "user", "content": query},
-            ],
-            temperature=0.1,
-            api_key=settings.llm_api_key,
-        )
-        translated = (response.choices[0].message.content or "").strip()
-        if translated:
-            logger.info("Translated query to %s: '%s' -> '%s'", target_name, query, translated)
-            return translated
-    except Exception:
-        logger.warning("Query translation to %s failed", target_name, exc_info=True)
-    return None
+    with operation_span(
+        _tracer, "translate_query",
+        input=query,
+        target_language=target_name,
+    ) as span:
+        try:
+            response = await litellm.acompletion(
+                model=settings.llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"Translate the following product search query to {target_name}. "
+                            "Return ONLY the translated query, nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                temperature=0.1,
+                api_key=settings.llm_api_key,
+            )
+            translated = (response.choices[0].message.content or "").strip()
+            usage = response.get("usage") or {}
+            set_span_token_counts(
+                span,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+            if translated:
+                logger.info("Translated query to %s: '%s' -> '%s'", target_name, query, translated)
+                span.set_attribute("output", translated)
+                span.set_attribute("summary", f"Translated '{query}' -> '{translated}' ({target_name})")
+                return translated
+            span.set_attribute("summary", f"Translation returned empty for '{query}'")
+        except Exception as exc:
+            logger.warning("Query translation to %s failed", target_name, exc_info=True)
+            span.set_attribute("summary", f"Translation failed: {type(exc).__name__}: {str(exc)[:200]}")
+        return None
 
 
 _REQUEST_HEADERS = {
@@ -249,41 +264,69 @@ async def _run_single_search(
     _max_attempts: int = 2,
 ) -> list[SearchResult]:
     """Execute one DuckDuckGo HTML search and return parsed results."""
-    for attempt in range(1, _max_attempts + 1):
-        try:
-            async with AsyncSession(
-                timeout=_REQUEST_TIMEOUT,
-                headers=_REQUEST_HEADERS,
-                impersonate="chrome",
-            ) as client:
-                response = await client.get(url, allow_redirects=True)
-        except Exception:
-            logger.warning(
-                "HTTP request failed for '%s' (attempt %d/%d)",
-                query, attempt, _max_attempts,
-            )
-            if attempt == _max_attempts:
-                return []
-            continue
+    with operation_span(
+        _tracer, "http_search",
+        input=query,
+        search_url=url,
+    ) as span:
+        for attempt in range(1, _max_attempts + 1):
+            try:
+                async with AsyncSession(
+                    timeout=_REQUEST_TIMEOUT,
+                    headers=_REQUEST_HEADERS,
+                    impersonate="chrome",
+                ) as client:
+                    response = await client.get(url, allow_redirects=True)
+            except Exception as exc:
+                logger.warning(
+                    "HTTP request failed for '%s' (attempt %d/%d)",
+                    query, attempt, _max_attempts,
+                )
+                span.add_event("search.http_error", {
+                    "attempt": attempt,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                })
+                if attempt == _max_attempts:
+                    span.set_attribute("summary", f"All {_max_attempts} attempts failed with HTTP errors")
+                    return []
+                continue
 
-        if response.status_code != 200:
-            logger.warning(
-                "Search returned HTTP %d for '%s' (attempt %d/%d)",
-                response.status_code, query, attempt, _max_attempts,
-            )
-            if attempt == _max_attempts:
-                return []
-            continue
+            span.set_attribute("http_status", response.status_code)
+            if response.status_code != 200:
+                logger.warning(
+                    "Search returned HTTP %d for '%s' (attempt %d/%d)",
+                    response.status_code, query, attempt, _max_attempts,
+                )
+                span.add_event("search.bad_status", {
+                    "attempt": attempt,
+                    "status_code": response.status_code,
+                })
+                if attempt == _max_attempts:
+                    span.set_attribute("summary", f"Search failed: HTTP {response.status_code}")
+                    return []
+                continue
 
-        html = response.text
-        results = extract_search_results(html)
-        if not results:
-            logger.warning("No results extracted from HTML for '%s'", query)
-        else:
-            logger.info("Found %d search results for '%s'", len(results), query)
-        return results
+            html = response.text
+            span.set_attribute("response_length", len(html))
 
-    return []
+            # Check for DuckDuckGo rate-limiting indicators
+            if "captcha" in html.lower() or "unusual traffic" in html.lower():
+                span.add_event("search.rate_limited", {"indicator": "captcha_or_traffic_warning"})
+                span.set_attribute("rate_limited", True)
+
+            results = extract_search_results(html)
+            span.set_attribute("result_count", len(results))
+            if not results:
+                logger.warning("No results extracted from HTML for '%s'", query)
+                span.set_attribute("summary", f"HTTP 200 but 0 results parsed from {len(html)} chars HTML (possible rate-limit or empty page)")
+            else:
+                logger.info("Found %d search results for '%s'", len(results), query)
+                top_domains = [r.url.split("/")[2] if "/" in r.url else r.url for r in results[:5]]
+                span.set_attribute("summary", f"Found {len(results)} results. Top: {', '.join(top_domains)}")
+            return results
+
+        span.set_attribute("summary", "All attempts exhausted with no results")
+        return []
 
 
 async def search_products(
@@ -316,6 +359,7 @@ async def search_products(
     # Determine if a second localized search is needed
     market_lang = get_market_language(market)
     need_local_search = market_lang is not None and market_lang != language
+    span.set_attribute("search_mode", "dual" if need_local_search else "single")
 
     if need_local_search:
         # Translate the query to the market's language for local results
@@ -328,7 +372,6 @@ async def search_products(
             )
             span.set_attribute("local_search_url", local_url)
             span.set_attribute("translated_query", translated)
-            span.set_attribute("search_mode", "dual")
 
             # Run searches sequentially to avoid DuckDuckGo rate-limiting
             primary_results = await _run_single_search(url, query, _max_attempts=_max_attempts)
@@ -346,6 +389,8 @@ async def search_products(
             span.set_attribute("result_count", len(merged))
             span.set_attribute("local_result_count", len(local_results))
             span.set_attribute("primary_result_count", len(primary_results))
+            span.set_attribute("summary",
+                f"Dual search: {len(local_results)} local ({market_lang}) + {len(primary_results)} primary ({language}) = {len(merged)} merged")
             logger.info(
                 "Dual search: %d local + %d primary = %d merged for '%s'",
                 len(local_results), len(primary_results), len(merged), query,
@@ -357,6 +402,9 @@ async def search_products(
     span.set_attribute("result_count", len(results))
     if not results:
         span.set_attribute("exit_reason", "no_results_extracted")
+        span.set_attribute("summary", f"Single search returned 0 results for '{query}'")
+    else:
+        span.set_attribute("summary", f"Single search found {len(results)} results for '{query}'")
     return results
 
 
@@ -392,6 +440,7 @@ async def search_products_via_browser(
     span = trace.get_current_span()
     span.set_attribute("browser_search_url", search_url)
     span.set_attribute("browser_locale", locale)
+    span.set_attribute("browser_google_domain", google_domain)
     logger.info("Browser search: '%s' on %s (locale=%s)", search_text, google_domain, locale)
 
     try:
@@ -460,13 +509,17 @@ async def search_products_via_browser(
             logger.info("Browser search found %d results for '%s'", len(results), query)
 
             if results:
+                span.set_attribute("summary",
+                    f"Browser search on {google_domain} found {len(results)} results")
                 return results
 
-    except Exception:
+    except Exception as exc:
         logger.warning("Browser search failed for '%s'", query, exc_info=True)
         span.set_attribute("browser_search_error", "true")
+        span.set_attribute("browser_error_detail", f"{type(exc).__name__}: {str(exc)[:200]}")
 
     # Fallback to HTTP-based search
+    span.set_attribute("summary", f"Browser search failed/empty, falling back to HTTP search")
     logger.info("Falling back to HTTP search for '%s'", query)
     return await search_products(query, language, market, refined_query=refined_query)
 
@@ -506,64 +559,84 @@ async def discover_aggregators(
         return []
 
     market_name = get_market_name(market)
-    try:
-        response = await litellm.acompletion(
-            model=settings.llm_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a shopping research expert. Given a country and product category, "
-                        "return a JSON array of price-comparison or marketplace websites popular in "
-                        "that country for that category. Each entry should have:\n"
-                        '- "domain": the site domain (e.g. "zap.co.il")\n'
-                        '- "url_template": the search URL with {query} as placeholder\n'
-                        '- "categories": array of category keywords this site covers\n'
-                        "Return ONLY the JSON array, no other text. "
-                        "Include 3-5 sites. Only include real, well-known sites."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Country: {market_name}\nProduct category: {category}",
-                },
-            ],
-            temperature=0.2,
-            api_key=settings.llm_api_key,
-        )
-        raw = (response.choices[0].message.content or "").strip()
-        # Strip markdown fences
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
+    with operation_span(
+        _tracer, "discover_aggregators",
+        input=f"{market_name}/{category}",
+        market=market,
+        category=category,
+    ) as span:
+        try:
+            system_prompt = (
+                "You are a shopping research expert. Given a country and product category, "
+                "return a JSON array of price-comparison or marketplace websites popular in "
+                "that country for that category. Each entry should have:\n"
+                '"domain": the site domain (e.g. "zap.co.il")\n'
+                '"url_template": the search URL with {query} as placeholder\n'
+                '"categories": array of category keywords this site covers\n'
+                "Return ONLY the JSON array, no other text. "
+                "Include 3-5 sites. Only include real, well-known sites."
+            )
+            user_prompt = f"Country: {market_name}\nProduct category: {category}"
+            span.set_attribute("llm.system_prompt", system_prompt)
+            span.set_attribute("llm.user_prompt", user_prompt)
+            span.set_attribute("llm.model", settings.llm_model)
 
-        sites = json.loads(raw)
-        if not isinstance(sites, list):
+            response = await litellm.acompletion(
+                model=settings.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                api_key=settings.llm_api_key,
+            )
+            raw = (response.choices[0].message.content or "").strip()
+            usage = response.get("usage") or {}
+            set_span_token_counts(
+                span,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+            span.set_attribute("llm.raw_response", raw[:1000])
+
+            # Strip markdown fences
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+
+            sites = json.loads(raw)
+            if not isinstance(sites, list):
+                span.set_attribute("summary", "LLM returned non-list JSON")
+                return []
+
+            from src.mcp_servers.web_search_mcp.aggregator_db import save_aggregator
+
+            saved: list[dict[str, str]] = []
+            for site in sites:
+                domain = site.get("domain", "")
+                url_tpl = site.get("url_template", "")
+                cats = site.get("categories", [])
+                if not domain or not url_tpl or "{query}" not in url_tpl:
+                    continue
+                await save_aggregator(domain, url_tpl, market, cats, source="llm")
+                saved.append({"domain": domain, "url_template": url_tpl})
+
+            domains = [s["domain"] for s in saved]
+            span.set_attribute("output", json.dumps(saved, ensure_ascii=False))
+            span.set_attribute("summary",
+                f"Discovered {len(saved)} aggregators for {market_name}/{category}: {', '.join(domains)}")
+            logger.info(
+                "Discovered %d aggregators for %s/%s via LLM",
+                len(saved), market, category,
+            )
+            return saved
+
+        except Exception as exc:
+            logger.warning(
+                "LLM aggregator discovery failed for %s/%s",
+                market, category, exc_info=True,
+            )
+            span.set_attribute("summary", f"Failed: {type(exc).__name__}: {str(exc)[:200]}")
             return []
-
-        from src.mcp_servers.web_search_mcp.aggregator_db import save_aggregator
-
-        saved: list[dict[str, str]] = []
-        for site in sites:
-            domain = site.get("domain", "")
-            url_tpl = site.get("url_template", "")
-            cats = site.get("categories", [])
-            if not domain or not url_tpl or "{query}" not in url_tpl:
-                continue
-            await save_aggregator(domain, url_tpl, market, cats, source="llm")
-            saved.append({"domain": domain, "url_template": url_tpl})
-
-        logger.info(
-            "Discovered %d aggregators for %s/%s via LLM",
-            len(saved), market, category,
-        )
-        return saved
-
-    except Exception:
-        logger.warning(
-            "LLM aggregator discovery failed for %s/%s",
-            market, category, exc_info=True,
-        )
-        return []
 
 
 async def search_on_site(
@@ -575,6 +648,16 @@ async def search_on_site(
     """Search for a model ID on a specific seller's website via DuckDuckGo ``site:`` prefix."""
     site_query = f"site:{domain} {model_id}"
     url = build_search_url(site_query, language, market)
-    results = await _run_single_search(url, site_query)
-    # Filter to results actually on the target domain
-    return [r for r in results if domain in r.url]
+    with operation_span(
+        _tracer, "search_on_site",
+        input=site_query,
+        domain=domain,
+        model_id=model_id,
+    ) as span:
+        results = await _run_single_search(url, site_query)
+        filtered = [r for r in results if domain in r.url]
+        span.set_attribute("raw_result_count", len(results))
+        span.set_attribute("filtered_result_count", len(filtered))
+        span.set_attribute("summary",
+            f"site:{domain} search for '{model_id}': {len(results)} raw -> {len(filtered)} on-domain results")
+        return filtered

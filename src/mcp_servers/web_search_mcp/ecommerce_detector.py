@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from opentelemetry import trace as otel_trace
+
 from src.shared.logging import get_logger
 from src.shared.market_config import get_market_tld, get_marketplace_domain_map
 
@@ -191,4 +193,20 @@ def identify_ecommerce_sites(
             results.append(signal)
 
     results.sort(key=lambda s: s.confidence, reverse=True)
+
+    # Record summary on current span
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        classified = [(s.domain, s.confidence, s.signals) for s in results[:8]]
+        rejected = [extract_domain(item.get("url", "")) for item in urls_data
+                     if extract_domain(item.get("url", "")) not in {s.domain for s in results}]
+        span.add_event("ecommerce.classification", {
+            "input_urls": len(urls_data),
+            "ecommerce_count": len(results),
+            "rejected_count": len(rejected),
+            "top_ecommerce": str(classified),
+            "rejected_domains": str(rejected[:10]),
+            "summary": f"{len(results)}/{len(urls_data)} URLs classified as ecommerce. Top: {', '.join(s.domain for s in results[:5])}",
+        })
+
     return results

@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from playwright.async_api import Browser, Page, async_playwright
 
 from src.shared.config import settings
+from opentelemetry import trace as otel_trace
+
 from src.shared.logging import get_logger
 from src.shared.market_config import (
     get_browser_geolocation,
@@ -30,6 +32,8 @@ async def get_browser() -> AsyncIterator[Browser]:
     browser: Browser | None = None
     is_remote = False
 
+    span = otel_trace.get_current_span()
+
     # Try remote browser first
     ws = settings.browser_ws_endpoint
     if ws:
@@ -37,8 +41,19 @@ async def get_browser() -> AsyncIterator[Browser]:
             browser = await pw.chromium.connect(ws)
             is_remote = True
             logger.info("Connected to remote browser at %s", ws)
+            if span and span.is_recording():
+                span.add_event("browser.connected", {
+                    "type": "remote",
+                    "ws_endpoint": ws,
+                    "summary": f"Connected to remote browser at {ws}",
+                })
         except Exception as exc:
             logger.warning("Remote browser connection failed (%s), falling back to local launch", exc)
+            if span and span.is_recording():
+                span.add_event("browser.remote_failed", {
+                    "ws_endpoint": ws,
+                    "error": str(exc)[:200],
+                })
 
     # Fall back to local launch
     if not browser:
@@ -48,18 +63,37 @@ async def get_browser() -> AsyncIterator[Browser]:
                 channel="chrome",
                 args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
             )
+            if span and span.is_recording():
+                span.add_event("browser.connected", {
+                    "type": "local",
+                    "engine": "chromium-chrome",
+                    "headless": settings.playwright_headless,
+                    "summary": "Launched local Chrome browser",
+                })
         except Exception:
             try:
                 browser = await pw.chromium.launch(
                     headless=settings.playwright_headless,
                     args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
                 )
+                if span and span.is_recording():
+                    span.add_event("browser.connected", {
+                        "type": "local",
+                        "engine": "chromium-bundled",
+                        "summary": "Launched local bundled Chromium",
+                    })
             except Exception as exc:
                 logger.warning("Chromium launch failed (%s), falling back to Firefox", exc)
                 try:
                     browser = await pw.firefox.launch(
                         headless=settings.playwright_headless,
                     )
+                    if span and span.is_recording():
+                        span.add_event("browser.connected", {
+                            "type": "local",
+                            "engine": "firefox",
+                            "summary": "Launched local Firefox (Chromium fallback failed)",
+                        })
                 except Exception as exc2:
                     await pw.stop()
                     raise RuntimeError("No browser could be launched") from exc2

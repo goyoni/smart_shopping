@@ -6,11 +6,20 @@ import re
 from collections import defaultdict
 from urllib.parse import urlparse
 
+from opentelemetry import trace as otel_trace
+
 from src.shared.models import QueryAttribute
 from src.shared.logging import get_logger
 from src.shared.models import CrossSeller, ProductResult, Seller
 
 logger = get_logger(__name__)
+
+
+def _processor_event(step: str, detail: str, **attrs: object) -> None:
+    """Record a processing step on the active OTEL span."""
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        span.add_event(f"processor.{step}", {"detail": detail, **attrs})
 
 _MAX_RESULTS = 20
 
@@ -83,6 +92,8 @@ def validate_results(
 
     criteria_keys = set(criteria.keys()) if criteria else set()
 
+    invalid_count = 0
+    warning_counts: dict[str, int] = {}
     for product in results:
         warnings: list[str] = []
         valid = True
@@ -112,12 +123,25 @@ def validate_results(
                     matched += 1
             completeness = matched / len(criteria_keys)
 
+        if not valid:
+            invalid_count += 1
+        for w in warnings:
+            warning_counts[w] = warning_counts.get(w, 0) + 1
+
         validated.append({
             "product": product,
             "valid": valid,
             "completeness": completeness,
             "warnings": warnings,
         })
+
+    valid_count = len(results) - invalid_count
+    _processor_event("validate",
+        f"{len(results)} products: {valid_count} valid, {invalid_count} invalid. Warnings: {warning_counts}",
+        valid_count=valid_count,
+        invalid_count=invalid_count,
+        warning_counts=str(warning_counts),
+    )
 
     return validated
 
@@ -160,6 +184,15 @@ def aggregate_sellers(results: list[ProductResult]) -> list[ProductResult]:
 
     for group_products in list(groups.values()) + fuzzy_groups:
         merged.append(_merge_group(group_products))
+
+    _processor_event("aggregate",
+        f"{len(results)} products -> {len(merged)} deduplicated ({len(groups)} by model_id, {len(fuzzy_groups)} by fuzzy name). "
+        f"Largest group: {max(len(g) for g in list(groups.values()) + fuzzy_groups) if groups or fuzzy_groups else 0} products",
+        input_count=len(results),
+        output_count=len(merged),
+        model_id_groups=len(groups),
+        fuzzy_groups=len(fuzzy_groups),
+    )
 
     return merged
 
@@ -297,13 +330,23 @@ def format_results(
             "best_currency": _best_currency(product),
         })
 
-    return {
+    result = {
         "products": formatted_products,
         "total_count": len(results),
         "displayed_count": len(capped),
         "source_count": len(all_domains),
         "format_type": format_type,
     }
+
+    sort_method = "attribute_preference" if user_attributes else format_type
+    _processor_event("format",
+        f"Formatted {len(capped)}/{len(results)} products (sort={sort_method}, sources={len(all_domains)})",
+        displayed_count=len(capped),
+        total_count=len(results),
+        sort_method=sort_method,
+    )
+
+    return result
 
 
 def _best_price(product: ProductResult) -> tuple[bool, float]:
@@ -366,6 +409,13 @@ def find_missing_models(
         missing_ids = [mid for mid in model_ids if mid.lower() not in carried]
         if missing_ids:
             missing[domain] = missing_ids
+
+    _processor_event("find_missing",
+        f"{len(domain_models)} sellers found. {len(missing)} have gaps: " +
+        ", ".join(f"{d}: missing {ids}" for d, ids in list(missing.items())[:5]),
+        seller_count=len(domain_models),
+        sellers_with_gaps=len(missing),
+    )
 
     return missing
 
@@ -453,4 +503,11 @@ def find_cross_sellers(
 
     # Sort: most products first, then lowest total price
     cross.sort(key=lambda c: (-len(c.products), c.total_price or float("inf")))
+
+    _processor_event("cross_sellers",
+        f"Found {len(cross)} cross-sellers from {len(domain_models)} seller domains. "
+        f"Top: {', '.join(f'{c.domain}({len(c.products)} products)' for c in cross[:5])}",
+        cross_seller_count=len(cross),
+    )
+
     return cross[:_MAX_CROSS_SELLERS]

@@ -187,6 +187,11 @@ class MainAgent:
             try:
                 # Check for model-based price search
                 model_ids = detect_model_ids(query)
+                root_span.add_event("decision.query_type", {
+                    "has_model_ids": bool(model_ids),
+                    "model_ids": json.dumps(model_ids) if model_ids else "[]",
+                    "summary": f"Query '{query}' -> {'model IDs: ' + ', '.join(model_ids) if model_ids else 'natural language search (no model IDs detected)'}",
+                })
                 if model_ids:
                     search_type = "multi_model" if len(model_ids) > 1 else "single_model_price"
                     root_span.set_attribute("search_type", search_type)
@@ -201,6 +206,10 @@ class MainAgent:
 
                 # Step 1: Extract product category
                 category = extract_category(query)
+                root_span.add_event("decision.category", {
+                    "category": category or "none",
+                    "summary": f"Category extraction: '{query}' -> {category or 'no category matched (will try LLM criteria discovery)'}",
+                })
                 if category:
                     root_span.set_attribute("category", category)
 
@@ -240,11 +249,26 @@ class MainAgent:
                     if cached:
                         criteria = cached
                         root_span.set_attribute("criteria_source", "cache")
+                        root_span.add_event("decision.criteria", {
+                            "source": "cache",
+                            "criteria_keys": json.dumps(list(criteria.keys())),
+                            "summary": f"Criteria loaded from cache for '{cache_key}': {list(criteria.keys())}",
+                        })
                     else:
                         criteria = await discover_criteria_via_llm(cache_key)
                         if criteria:
                             await save_cached(cache_key, criteria)
                             root_span.set_attribute("criteria_source", "llm")
+                            root_span.add_event("decision.criteria", {
+                                "source": "llm",
+                                "criteria_keys": json.dumps(list(criteria.keys())),
+                                "summary": f"Criteria discovered via LLM for '{cache_key}': {list(criteria.keys())}",
+                            })
+                        else:
+                            root_span.add_event("decision.criteria", {
+                                "source": "none",
+                                "summary": f"No criteria found for '{cache_key}' (neither cache nor LLM returned results)",
+                            })
 
                 # LLM fallback for attribute extraction on unknown categories
                 if not attributes and criteria and not category:
@@ -264,6 +288,13 @@ class MainAgent:
                 refined = None
                 if attributes or category:
                     refined = build_refined_query(query, category, attributes)
+                    root_span.add_event("decision.query_refinement", {
+                        "original_query": query,
+                        "refined_query": refined or query,
+                        "has_category": bool(category),
+                        "attribute_count": len(attributes),
+                        "summary": f"Query refined: '{query}' -> '{refined}'" if refined != query else f"Query unchanged: '{query}'",
+                    })
                 with operation_span(
                     _tracer, "search_web",
                     input=query,
@@ -329,12 +360,19 @@ class MainAgent:
                 if not ecommerce_signals:
                     root_span.set_attribute("exit_reason", "no_ecommerce_sites")
                     root_span.set_attribute("output", json.dumps({"exit_reason": "no_ecommerce_sites"}))
+                    root_span.set_attribute("summary", f"Pipeline stopped: {len(search_results)} search results but 0 classified as ecommerce")
                     await self._add_status("No e-commerce sites found in results")
                     self.state.status = SearchStatus.COMPLETED
                     return self.state
 
                 # Step 5: Scrape top e-commerce sites (browser needed here)
                 sites_to_scrape = ecommerce_signals[:_MAX_SITES_TO_SCRAPE]
+                root_span.add_event("decision.sites_to_scrape", {
+                    "total_ecommerce": len(ecommerce_signals),
+                    "scraping_count": len(sites_to_scrape),
+                    "sites": json.dumps([{"domain": s.domain, "confidence": s.confidence, "signals": s.signals} for s in sites_to_scrape], ensure_ascii=False),
+                    "summary": f"Scraping top {len(sites_to_scrape)}/{len(ecommerce_signals)} ecommerce sites: {', '.join(s.domain for s in sites_to_scrape)}",
+                })
                 await self._add_status(f"Scraping {len(sites_to_scrape)} e-commerce sites...")
 
                 locale = _build_locale(language, market)
@@ -543,7 +581,20 @@ class MainAgent:
                         # URL itself contains the model ID, trust the URL as
                         # a relevance signal (Hebrew product names won't
                         # contain the alphanumeric model ID).
-                        url_has_mid = mid_lower in url.lower()
+                        # BUT: exclude search/listing URLs where the model ID
+                        # appears only in query params (e.g. ?q=pl5147) — those
+                        # don't indicate the page is *about* that product.
+                        _search_indicators = (
+                            "/search", "/find", "/results",
+                            "q=", "query=", "search=", "keyword=",
+                            "keyphrase=",
+                        )
+                        _is_search_url = any(
+                            ind in url.lower() for ind in _search_indicators
+                        )
+                        url_has_mid = (
+                            mid_lower in url.lower() and not _is_search_url
+                        )
                         is_detail_page = len(scraped) <= 5
                         relevant: list[ProductResult] = []
                         filtered_out: list[dict] = []
@@ -640,10 +691,19 @@ class MainAgent:
                     # Add aggregator direct URLs from DB (filtered by market + category)
                     aggregator_entries = await get_aggregator_urls(model_id, market, category)
                     seen_domains = {s.domain for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]}
+                    added_aggregators = []
                     for entry in aggregator_entries:
                         if entry["domain"] not in seen_domains:
                             urls.append(entry["url"])
                             seen_domains.add(entry["domain"])
+                            added_aggregators.append(entry["domain"])
+
+                    ecom_domains = [s.domain for s in ecom_signals[:_MAX_SITES_TO_SCRAPE]]
+                    model_op.set_attribute("summary",
+                        f"Model '{model_id}': {len(results)} search results -> {len(ecom_signals)} ecommerce sites "
+                        f"({', '.join(ecom_domains)})"
+                        + (f" + {len(added_aggregators)} aggregators ({', '.join(added_aggregators)})" if added_aggregators else "")
+                        + f" = {len(urls)} URLs to scrape")
 
                     model_op.set_attribute("output", json.dumps({
                         "model_id": model_id,
@@ -733,6 +793,9 @@ class MainAgent:
                             "missing_count": fill_count,
                         }),
                     ) as fill_op:
+                        fill_op.set_attribute("summary",
+                            f"Cross-seller filling: {len(missing)} sellers have gaps. "
+                            + ", ".join(f"{d}: missing {ids}" for d, ids in list(missing.items())[:5]))
                         fill_tasks = []
                         fill_meta: list[tuple[str, str]] = []
 

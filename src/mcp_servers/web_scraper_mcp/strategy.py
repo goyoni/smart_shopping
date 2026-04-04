@@ -7,12 +7,14 @@ import re
 from dataclasses import asdict, dataclass, field
 
 import litellm
+from opentelemetry import trace as otel_trace
 from playwright.async_api import Page
 
 from src.shared.config import settings
-from src.shared.logging import get_logger
+from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
 
 logger = get_logger(__name__)
+_tracer = get_tracer(__name__)
 
 def _get_scraper_llm_model() -> str:
     """Return the LLM model to use for scraper strategy discovery."""
@@ -130,6 +132,9 @@ class ScrapingStrategy:
     # container's data-site-name attribute.
     name_attr: str = ""
     price_attr: str = ""
+    # Navigation: CSS selector for product links on listing/search pages.
+    # Used to navigate from a listing page to the matching product page.
+    product_link_selector: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -277,7 +282,16 @@ async def discover_strategy(
     Requires at least 2 matching containers to consider a strategy valid.
     Falls back to price-pattern discovery if CSS candidates fail.
     """
+    span = otel_trace.get_current_span()
+
+    def _strategy_event(step: str, detail: str, **attrs: object) -> None:
+        if span and span.is_recording():
+            span.add_event(f"strategy.{step}", {"detail": detail, **attrs})
+
+    _strategy_event("start", f"Beginning strategy discovery for query='{product_query[:80]}'")
+
     # Try each container candidate
+    css_tried = 0
     for container_selector in _CONTAINER_CANDIDATES:
         try:
             containers = await page.query_selector_all(container_selector)
@@ -287,6 +301,7 @@ async def discover_strategy(
         if len(containers) < 2:
             continue
 
+        css_tried += 1
         logger.info(
             "Found %d containers with selector '%s'",
             len(containers), container_selector,
@@ -317,6 +332,7 @@ async def discover_strategy(
 
         # Must find at least name selector OR name data attribute
         if not name_sel and not name_data_attr:
+            _strategy_event("css_candidates", f"'{container_selector}' has {len(containers)} containers but no name selector found", selector=container_selector)
             continue
 
         # Use the first container that has a name for currency/criteria probing
@@ -344,6 +360,15 @@ async def discover_strategy(
         # Discover per-criterion CSS selectors
         criteria_sels = await _discover_criteria_selectors(probe_container, criteria)
 
+        _strategy_event("css_candidates",
+            f"SUCCESS: container='{container_selector}' name='{name_sel or name_data_attr}' price='{price_sel or price_data_attr}' ({len(containers)} elements)",
+            discovery_method="css_candidates",
+            container_count=len(containers),
+        )
+        if span and span.is_recording():
+            span.set_attribute("strategy.summary",
+                f"css_candidates found {len(containers)} containers via '{container_selector}', name='{name_sel or name_data_attr}', price='{price_sel or price_data_attr}', currency={currency_hint}")
+
         return ScrapingStrategy(
             product_container=container_selector,
             name_selector=name_sel,
@@ -357,28 +382,62 @@ async def discover_strategy(
             price_attr=price_data_attr,
         )
 
+    _strategy_event("css_candidates", f"No CSS candidate worked (tried {css_tried} with >=2 containers)")
+
     # Fallback 1: single-product page discovery (product detail pages)
     logger.info("[strategy] CSS candidates failed, trying single-product fallback")
+    _strategy_event("single_product", "Trying single-product page detection...")
     strategy = await _discover_single_product(page, criteria)
     if strategy:
         logger.info("[strategy] single-product discovery succeeded: container='%s'", strategy.product_container[:60])
+        _strategy_event("single_product",
+            f"SUCCESS: container='{strategy.product_container}' name='{strategy.name_selector}' price='{strategy.price_selector}'",
+            discovery_method="single_product",
+        )
+        if span and span.is_recording():
+            span.set_attribute("strategy.summary",
+                f"single_product: container='{strategy.product_container}', name='{strategy.name_selector}', price='{strategy.price_selector}'")
         return strategy
+
+    _strategy_event("single_product", "Failed: no h1+price combination found")
 
     # Fallback 2: price-pattern based discovery
     logger.info("[strategy] single-product failed, trying price-pattern fallback")
+    _strategy_event("price_pattern", "Trying price-pattern JS walker...")
     strategy = await _discover_by_price_pattern(page)
     if strategy:
         logger.info("[strategy] price-pattern discovery succeeded: container='%s'", strategy.product_container[:60])
+        _strategy_event("price_pattern",
+            f"SUCCESS: container='{strategy.product_container}'",
+            discovery_method="price_pattern",
+        )
+        if span and span.is_recording():
+            span.set_attribute("strategy.summary",
+                f"price_pattern: container='{strategy.product_container}'")
         return strategy
+
+    _strategy_event("price_pattern", "Failed: no repeating price pattern found")
 
     # Fallback 3: LLM-based discovery — analyse the DOM and infer selectors
     logger.info("[strategy] price-pattern failed, trying LLM fallback")
+    _strategy_event("llm", "Trying LLM-based DOM analysis...")
     strategy = await _discover_via_llm(page, product_query, criteria)
     if strategy:
         logger.info("[strategy] LLM discovery succeeded: container='%s'", strategy.product_container[:60])
+        _strategy_event("llm",
+            f"SUCCESS: container='{strategy.product_container}' name='{strategy.name_selector}' price='{strategy.price_selector}'",
+            discovery_method="llm",
+        )
+        if span and span.is_recording():
+            span.set_attribute("strategy.summary",
+                f"llm: container='{strategy.product_container}', name='{strategy.name_selector}', price='{strategy.price_selector}'")
         return strategy
 
+    _strategy_event("llm", "Failed: LLM could not identify product selectors")
+
     logger.warning("[strategy] All discovery methods failed (css_candidates → single_product → price_pattern → llm)")
+    if span and span.is_recording():
+        span.set_attribute("strategy.summary", "ALL FAILED: css_candidates -> single_product -> price_pattern -> llm")
     return None
 
 
@@ -792,120 +851,393 @@ async def _discover_via_llm(
 
     logger.info("Attempting LLM strategy discovery (model=%s, snapshot=%d chars)", model, len(snapshot))
 
-    try:
-        llm_kwargs = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": _LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Product query: {product_query}\n\nDOM snapshot:\n{snapshot}"},
-            ],
-            "temperature": 0.0,
-        }
-        if api_key:
-            llm_kwargs["api_key"] = api_key
-        response = await litellm.acompletion(**llm_kwargs)
-        raw = (response.choices[0].message.content or "").strip()
-    except Exception:
-        logger.warning("LLM strategy discovery call failed", exc_info=True)
-        return None
+    with operation_span(
+        _tracer, "strategy_llm_discovery",
+        input=product_query,
+    ) as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("snapshot_length", len(snapshot))
 
-    # Parse the JSON response
-    # Strip markdown fences if present
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
+        user_prompt = f"Product query: {product_query}\n\nDOM snapshot:\n{snapshot}"
+        span.set_attribute("llm.system_prompt", _LLM_SYSTEM_PROMPT)
+        span.set_attribute("llm.user_prompt", user_prompt[:2000])
 
-    try:
-        selectors = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("LLM returned invalid JSON: %s", raw[:200])
-        return None
-
-    container_sel = selectors.get("container", "")
-    name_sel = selectors.get("name", "")
-    price_sel = selectors.get("price", "")
-    image_sel = selectors.get("image", "")
-    url_sel = selectors.get("url", "")
-    currency_hint = selectors.get("currency", "")
-
-    if not container_sel:
-        logger.warning("LLM returned empty container selector")
-        return None
-
-    # --- Validate against the live page ---
-    try:
-        containers = await page.query_selector_all(container_sel)
-    except Exception:
-        logger.warning("LLM container selector '%s' is invalid CSS", container_sel)
-        return None
-
-    if len(containers) < 2:
-        logger.warning(
-            "LLM container selector '%s' matched %d elements (need ≥2)",
-            container_sel, len(containers),
-        )
-        return None
-
-    # Verify at least one container has a name element
-    has_name = False
-    for probe in containers[:3]:
         try:
-            el = await probe.query_selector(name_sel) if name_sel else None
-            if el:
-                text = (await el.inner_text()).strip()
-                if text and 2 <= len(text) <= 300:
-                    has_name = True
-                    break
+            llm_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _LLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.0,
+            }
+            if api_key:
+                llm_kwargs["api_key"] = api_key
+            response = await litellm.acompletion(**llm_kwargs)
+            raw = (response.choices[0].message.content or "").strip()
+            usage = response.get("usage") or {}
+            set_span_token_counts(
+                span,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+        except Exception as exc:
+            logger.warning("LLM strategy discovery call failed", exc_info=True)
+            span.set_attribute("summary", f"LLM call failed: {type(exc).__name__}: {str(exc)[:200]}")
+            return None
+
+        span.set_attribute("llm.raw_response", raw[:1000])
+
+        # Parse the JSON response
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        try:
+            selectors = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("LLM returned invalid JSON: %s", raw[:200])
+            span.set_attribute("summary", f"LLM returned invalid JSON: {raw[:200]}")
+            return None
+
+        container_sel = selectors.get("container", "")
+        name_sel = selectors.get("name", "")
+        price_sel = selectors.get("price", "")
+        image_sel = selectors.get("image", "")
+        url_sel = selectors.get("url", "")
+        currency_hint = selectors.get("currency", "")
+
+        span.set_attribute("llm.parsed_selectors", json.dumps(selectors))
+
+        if not container_sel:
+            logger.warning("LLM returned empty container selector")
+            span.set_attribute("summary", "LLM returned empty container selector")
+            return None
+
+        # --- Validate against the live page ---
+        try:
+            containers = await page.query_selector_all(container_sel)
         except Exception:
-            continue
+            logger.warning("LLM container selector '%s' is invalid CSS", container_sel)
+            span.set_attribute("summary", f"LLM container '{container_sel}' is invalid CSS")
+            return None
 
-    if not has_name:
-        # Try common name fallbacks before giving up
-        for fallback in ["a", "h2", "h3", "[class*='name']", "[class*='title']"]:
-            for probe in containers[:3]:
-                try:
-                    el = await probe.query_selector(fallback)
-                    if el:
-                        text = (await el.inner_text()).strip()
-                        if text and 2 <= len(text) <= 300:
-                            name_sel = fallback
-                            has_name = True
-                            break
-                except Exception:
-                    continue
-            if has_name:
-                break
+        span.set_attribute("container_match_count", len(containers))
 
-    if not has_name:
-        logger.warning("LLM strategy: no valid name element found in containers")
-        return None
+        if len(containers) < 2:
+            logger.warning(
+                "LLM container selector '%s' matched %d elements (need ≥2)",
+                container_sel, len(containers),
+            )
+            span.set_attribute("summary", f"LLM container '{container_sel}' matched only {len(containers)} elements (need >=2)")
+            return None
 
-    # Detect currency from first price element if not provided by LLM
-    if not currency_hint and price_sel:
+        # Verify at least one container has a name element
+        has_name = False
         for probe in containers[:3]:
             try:
-                price_el = await probe.query_selector(price_sel)
-                if price_el:
-                    price_text = await price_el.inner_text()
-                    currency_hint = _detect_currency(price_text)
-                    if currency_hint:
+                el = await probe.query_selector(name_sel) if name_sel else None
+                if el:
+                    text = (await el.inner_text()).strip()
+                    if text and 2 <= len(text) <= 300:
+                        has_name = True
                         break
             except Exception:
                 continue
 
-    criteria_sels = await _discover_criteria_selectors(containers[0], criteria)
+        if not has_name:
+            for fallback in ["a", "h2", "h3", "[class*='name']", "[class*='title']"]:
+                for probe in containers[:3]:
+                    try:
+                        el = await probe.query_selector(fallback)
+                        if el:
+                            text = (await el.inner_text()).strip()
+                            if text and 2 <= len(text) <= 300:
+                                name_sel = fallback
+                                has_name = True
+                                break
+                    except Exception:
+                        continue
+                if has_name:
+                    break
 
-    logger.info(
-        "LLM discovered strategy: container='%s' name='%s' price='%s' (%d containers)",
-        container_sel, name_sel, price_sel, len(containers),
-    )
+        if not has_name:
+            logger.warning("LLM strategy: no valid name element found in containers")
+            span.set_attribute("summary", f"LLM container '{container_sel}' has {len(containers)} elements but no valid name text found")
+            return None
 
-    return ScrapingStrategy(
-        product_container=container_sel,
-        name_selector=name_sel,
-        price_selector=price_sel,
-        image_selector=image_sel,
-        url_selector=url_sel,
-        currency_hint=currency_hint,
-        discovery_method="llm",
-        criteria_selectors=criteria_sels,
-    )
+        # Detect currency from first price element if not provided by LLM
+        if not currency_hint and price_sel:
+            for probe in containers[:3]:
+                try:
+                    price_el = await probe.query_selector(price_sel)
+                    if price_el:
+                        price_text = await price_el.inner_text()
+                        currency_hint = _detect_currency(price_text)
+                        if currency_hint:
+                            break
+                except Exception:
+                    continue
+
+        criteria_sels = await _discover_criteria_selectors(containers[0], criteria)
+
+        logger.info(
+            "LLM discovered strategy: container='%s' name='%s' price='%s' (%d containers)",
+            container_sel, name_sel, price_sel, len(containers),
+        )
+        span.set_attribute("summary",
+            f"LLM SUCCESS: container='{container_sel}' ({len(containers)} elements), name='{name_sel}', price='{price_sel}', currency={currency_hint}")
+
+        return ScrapingStrategy(
+            product_container=container_sel,
+            name_selector=name_sel,
+            price_selector=price_sel,
+            image_selector=image_sel,
+            url_selector=url_sel,
+            currency_hint=currency_hint,
+            discovery_method="llm",
+            criteria_selectors=criteria_sels,
+        )
+
+
+# ===================================================================
+# Listing → product page navigation
+# ===================================================================
+
+# CSS selectors tried in order to find product links on listing pages
+_PRODUCT_LINK_CANDIDATES: list[str] = [
+    "a[href*='/product/']",
+    "a[href*='/dp/']",
+    "a[href*='/item/']",
+    "a[href*='/p/']",
+    "a[href*='/model/']",
+    "a[href*='pid=']",
+    "a[href*='productid=']",
+    ".product-card a",
+    ".product-item a",
+    "[class*='product'] a[href]",
+    "[class*='Product'] a[href]",
+    "[data-product-id] a[href]",
+    "h2 a[href]",
+    "h3 a[href]",
+    "[class*='title'] a[href]",
+    "[class*='name'] a[href]",
+]
+
+
+async def find_product_url(
+    page: Page,
+    product_query: str,
+    base_url: str,
+    cached_selector: str = "",
+) -> str | None:
+    """Find a product link on a listing/search page that matches the query.
+
+    Tries cached selector first, then CSS candidates, then LLM fallback.
+    Returns the URL of the best matching product, or None.
+    """
+    from urllib.parse import urljoin
+
+    span = otel_trace.get_current_span()
+    query_lower = product_query.lower()
+    query_tokens = [t for t in query_lower.split() if len(t) >= 3]
+
+    # Try cached selector first
+    if cached_selector:
+        url = await _match_product_link(page, cached_selector, query_lower, query_tokens, base_url)
+        if url:
+            logger.info("[nav] found product via cached selector '%s': %s", cached_selector, url[:100])
+            if span and span.is_recording():
+                span.add_event("nav.found", {"method": "cached_selector", "selector": cached_selector, "url": url[:200]})
+            return url
+
+    # Try CSS candidates
+    for selector in _PRODUCT_LINK_CANDIDATES:
+        url = await _match_product_link(page, selector, query_lower, query_tokens, base_url)
+        if url:
+            logger.info("[nav] found product via css candidate '%s': %s", selector, url[:100])
+            if span and span.is_recording():
+                span.add_event("nav.found", {"method": "css_candidate", "selector": selector, "url": url[:200]})
+            return url
+
+    # LLM fallback
+    url, selector = await _find_product_url_via_llm(page, product_query, base_url)
+    if url:
+        logger.info("[nav] found product via LLM (selector='%s'): %s", selector, url[:100])
+        if span and span.is_recording():
+            span.add_event("nav.found", {"method": "llm", "selector": selector, "url": url[:200]})
+        return url
+
+    logger.warning("[nav] could not find product link for '%s' on %s", product_query, base_url[:80])
+    if span and span.is_recording():
+        span.add_event("nav.not_found", {"query": product_query, "base_url": base_url[:200]})
+    return None
+
+
+async def _match_product_link(
+    page: Page,
+    selector: str,
+    query_lower: str,
+    query_tokens: list[str],
+    base_url: str,
+) -> str | None:
+    """Try to find a link matching the query using the given selector.
+
+    Returns the href of the best matching link, or None.
+    """
+    from urllib.parse import urljoin
+
+    try:
+        links = await page.query_selector_all(selector)
+    except Exception:
+        return None
+
+    if not links:
+        return None
+
+    best_url: str | None = None
+    best_score = 0
+
+    for link in links[:30]:  # Don't scan too many
+        try:
+            href = await link.get_attribute("href")
+            if not href or href.startswith("#") or href.startswith("javascript:"):
+                continue
+
+            text = (await link.inner_text()).strip().lower()
+            if not text:
+                # Try parent text for links inside product cards
+                try:
+                    parent = await link.evaluate_handle("el => el.closest('[class*=\"product\"], [class*=\"Product\"], li, article')")
+                    if parent:
+                        text = (await parent.inner_text() if hasattr(parent, 'inner_text') else "").strip().lower()
+                except Exception:
+                    pass
+            if not text:
+                continue
+
+            # Score: how well does this link match the query?
+            score = 0
+            if query_lower in text:
+                score += 10  # Full query match in text
+            if query_lower in href.lower():
+                score += 5  # Query in URL
+            for tok in query_tokens:
+                if tok in text:
+                    score += 2
+                if tok in href.lower():
+                    score += 1
+
+            if score > best_score:
+                best_score = score
+                full_url = urljoin(base_url, href)
+                best_url = full_url
+        except Exception:
+            continue
+
+    if best_score >= 2:
+        return best_url
+    return None
+
+
+_LLM_NAV_SYSTEM = """\
+You are a web scraping expert. Given a DOM snapshot of a search/listing page, \
+identify the CSS selector for product links that lead to individual product pages.
+
+Return ONLY a valid JSON object (no markdown, no explanation):
+{"product_link_selector": "CSS selector for product links", "best_match_text": "visible text of the link matching the query"}
+
+Rules:
+- The selector must target <a> elements with href attributes.
+- Prefer selectors that target product title/name links.
+- If you cannot identify product links, return {"product_link_selector": "", "best_match_text": ""}"""
+
+
+async def _find_product_url_via_llm(
+    page: Page,
+    product_query: str,
+    base_url: str,
+) -> tuple[str | None, str]:
+    """Use LLM to find a product link on a listing page.
+
+    Returns (url, discovered_selector) or (None, "").
+    """
+    from urllib.parse import urljoin
+
+    model = _get_scraper_llm_model()
+    api_key = settings.llm_api_key
+    is_local = model.startswith("ollama/")
+    if not api_key and not is_local:
+        return None, ""
+
+    snapshot = await _build_dom_snapshot(page)
+    if not snapshot:
+        return None, ""
+
+    logger.info("[nav] LLM navigation discovery for '%s' (model=%s)", product_query, model)
+
+    with operation_span(
+        _tracer, "nav_llm_discovery",
+        input=product_query,
+    ) as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("base_url", base_url[:200])
+
+        user_prompt = (
+            f"Search query: {product_query}\n"
+            f"Page URL: {base_url}\n\n"
+            f"DOM snapshot:\n{snapshot}"
+        )
+        span.set_attribute("llm.system_prompt", _LLM_NAV_SYSTEM)
+        span.set_attribute("llm.user_prompt", user_prompt[:2000])
+
+        try:
+            llm_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _LLM_NAV_SYSTEM},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.0,
+            }
+            if api_key:
+                llm_kwargs["api_key"] = api_key
+            response = await litellm.acompletion(**llm_kwargs)
+            raw = (response.choices[0].message.content or "").strip()
+            usage = response.get("usage") or {}
+            set_span_token_counts(
+                span,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+        except Exception as exc:
+            logger.warning("[nav] LLM navigation call failed", exc_info=True)
+            span.set_attribute("summary", f"LLM call failed: {type(exc).__name__}")
+            return None, ""
+
+        span.set_attribute("llm.raw_response", raw[:500])
+
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("[nav] LLM returned invalid JSON: %s", raw[:200])
+            span.set_attribute("summary", f"LLM returned invalid JSON: {raw[:200]}")
+            return None, ""
+
+        selector = (data.get("product_link_selector") or "").strip()
+        if not selector:
+            span.set_attribute("summary", "LLM returned empty selector")
+            return None, ""
+
+        span.set_attribute("discovered_selector", selector)
+
+        # Use the discovered selector to find the matching link
+        query_lower = product_query.lower()
+        query_tokens = [t for t in query_lower.split() if len(t) >= 3]
+        url = await _match_product_link(page, selector, query_lower, query_tokens, base_url)
+        if url:
+            span.set_attribute("summary", f"Found product URL via LLM selector '{selector}': {url[:150]}")
+        else:
+            span.set_attribute("summary", f"LLM selector '{selector}' found no matching product link")
+        return url, selector

@@ -16,11 +16,21 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from playwright.async_api import Page
 
-from src.shared.logging import get_logger
+from opentelemetry import trace as otel_trace
+
+from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
 from src.shared.market_config import get_default_currency_for_domain, get_garbage_names
 from src.shared.models import ProductResult, Seller
 
 logger = get_logger(__name__)
+_tracer = get_tracer(__name__)
+
+
+def _extraction_event(method: str, detail: str, **attrs: object) -> None:
+    """Record an extraction step as a span event on the active OTEL span."""
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        span.add_event(f"extraction.{method}", {"detail": detail, **attrs})
 
 _MAX_SANE_PRICE = 1_000_000
 
@@ -79,33 +89,46 @@ def extract_all_from_soup(
 
     # 1. Data-attribute extraction (price-comparison aggregators)
     products = _extract_from_data_attrs(soup, url, domain, page_product_name)
+    _extraction_event("data_attrs", f"{len(products)} products" if products else "0 products", product_count=len(products))
     if products:
         results.append(("data_attrs", products))
 
     # 2. JSON-LD (single Product)
     product = _extract_jsonld_from_soup(soup, url, domain)
+    _extraction_event("jsonld", f"found: {product.name[:60]}" if product else "not found", product_count=1 if product else 0)
     if product:
         results.append(("jsonld", [product]))
 
     # 3. JSON-LD ItemList (product listings / search results)
     itemlist_products = _extract_jsonld_itemlist_from_soup(soup, url, domain)
+    _extraction_event("jsonld_itemlist", f"{len(itemlist_products)} products" if itemlist_products else "0 products", product_count=len(itemlist_products))
     if itemlist_products:
         results.append(("jsonld_itemlist", itemlist_products))
 
     # 4. Microdata (itemprop)
     product = _extract_microdata_from_soup(soup, url, domain)
+    _extraction_event("microdata", f"found: {product.name[:60]}" if product else "not found", product_count=1 if product else 0)
     if product:
         results.append(("microdata", [product]))
 
     # 5. OG meta tags
     product = _extract_og_product_from_soup(soup, url, domain)
+    _extraction_event("og_meta", f"found: {product.name[:60]}" if product else "not found (og:type!=product or no price)", product_count=1 if product else 0)
     if product:
         results.append(("og_meta", [product]))
 
     # 6. CSS listing cards (search/category pages with visible product cards)
     listing_products = _extract_listing_cards_from_soup(soup, url, domain)
+    _extraction_event("css_listing", f"{len(listing_products)} products" if listing_products else "0 products (no card containers with >=2 elements)", product_count=len(listing_products))
     if listing_products:
         results.append(("css_listing", listing_products))
+
+    # Summary event
+    methods_with_results = [(m, len(p)) for m, p in results]
+    _extraction_event("soup_summary",
+        f"Ran 6 methods on {domain}: {methods_with_results if methods_with_results else 'all returned 0'}",
+        winning_methods=str(methods_with_results),
+    )
 
     return results
 
@@ -134,22 +157,32 @@ async def extract_all_from_page(
     # 1. CSS strategy discovery + extraction
     strategy = await discover_strategy(page, product_query, criteria=criteria)
     if strategy:
+        _extraction_event("css_strategy", f"Strategy found: container='{strategy.product_container}' method={strategy.discovery_method}")
         products = await extract_with_strategy(page, strategy, url, criteria=criteria)
         if products:
-            # Quality check: reject when strategy latched onto nav/UI elements
             if not _is_low_quality_batch(products):
+                _extraction_event("css_strategy", f"{len(products)} products extracted", product_count=len(products))
                 results.append(("css_strategy", products))
+            else:
+                _extraction_event("css_strategy", f"Rejected {len(products)} products as low-quality (nav/UI elements)", product_count=len(products))
+        else:
+            _extraction_event("css_strategy", "Strategy matched but extracted 0 products")
+    else:
+        _extraction_event("css_strategy", "No strategy discovered (all methods failed)")
 
     # 2. API response interception
+    _extraction_event("api_intercept", f"{len(captured_responses)} API responses captured", response_count=len(captured_responses))
     if captured_responses:
         api_products = extract_from_api_responses(
             captured_responses, url, domain, product_query,
         )
+        _extraction_event("api_intercept", f"{len(api_products)} products from API responses", product_count=len(api_products))
         if api_products:
             results.append(("api_intercept", api_products))
 
     # 3. In-page JSON-LD / microdata / OG via JS evaluation
     fallback = await _extract_jsonld_product_js(page, url, domain)
+    _extraction_event("jsonld_js", f"found: {fallback.name[:60]}" if fallback else "not found", product_count=1 if fallback else 0)
     if fallback:
         results.append(("jsonld_js", [fallback]))
 
@@ -158,15 +191,41 @@ async def extract_all_from_page(
     try:
         rendered_html = await page.content()
         if len(rendered_html) > 1000:
+            _extraction_event("rendered_html", f"Parsing {len(rendered_html)} chars of rendered HTML")
             soup = BeautifulSoup(rendered_html, "lxml")
             soup_results = extract_all_from_soup(soup, url, domain, product_query)
             for method, products in soup_results:
-                # Avoid duplicating jsonld if we already got it from JS
                 if method == "jsonld" and any(m == "jsonld_js" for m, _ in results):
                     continue
                 results.append((f"{method}_rendered", products))
     except Exception:
         pass
+
+    # 5. LLM direct extraction — last resort when no method found a price.
+    _has_priced = any(
+        any(s.price is not None and s.price > 0 for s in p.sellers)
+        for _, prods in results for p in prods
+    )
+    if not _has_priced and product_query:
+        _extraction_event("llm_extract", "No priced products found, trying LLM extraction")
+        llm_product = await _extract_product_via_llm(page, product_query, url, domain)
+        if llm_product:
+            price_info = f"price={llm_product.sellers[0].price}" if llm_product.sellers else "no price"
+            _extraction_event("llm_extract", f"LLM extracted: '{llm_product.name[:60]}' ({price_info})", product_count=1)
+            results.append(("llm_extract", [llm_product]))
+        else:
+            _extraction_event("llm_extract", "LLM extraction also returned nothing")
+
+    # Summary
+    methods_with_results = [(m, len(p)) for m, p in results]
+    _extraction_event("page_summary",
+        f"Playwright extraction on {domain}: {methods_with_results if methods_with_results else 'all methods returned 0'}",
+        winning_methods=str(methods_with_results),
+        has_priced=_has_priced or any(
+            any(s.price is not None and s.price > 0 for s in p.sellers)
+            for _, prods in results for p in prods
+        ),
+    )
 
     return results
 
@@ -718,7 +777,14 @@ async def extract_with_strategy(
         containers = await page.query_selector_all(strategy.product_container)
     except Exception:
         logger.warning("Failed to find containers with '%s'", strategy.product_container)
+        _extraction_event("css_strategy_extract",
+            f"Container selector '{strategy.product_container}' failed (invalid CSS or page changed)")
         return []
+
+    _extraction_event("css_strategy_extract",
+        f"Found {len(containers)} containers via '{strategy.product_container}', extracting with name='{strategy.name_selector or strategy.name_attr}' price='{strategy.price_selector or strategy.price_attr}'",
+        container_count=len(containers),
+    )
 
     extraction_patterns = build_extraction_patterns(criteria)
 
@@ -731,6 +797,12 @@ async def extract_with_strategy(
         if product:
             products.append(product)
 
+    priced = sum(1 for p in products if any(s.price is not None and s.price > 0 for s in p.sellers))
+    _extraction_event("css_strategy_extract",
+        f"Extracted {len(products)} products ({priced} with prices) from {len(containers)} containers on {domain}",
+        product_count=len(products),
+        priced_count=priced,
+    )
     logger.info("Extracted %d products from %s", len(products), domain)
     return products
 
@@ -888,6 +960,12 @@ def extract_from_api_responses(
 
     for resp in responses:
         found = _find_products_in_json(resp["data"], domain, page_url, query_lower)
+        if found:
+            _extraction_event("api_response_parse",
+                f"Found {len(found)} products from API: {resp.get('url', '?')[:120]}",
+                api_url=str(resp.get("url", ""))[:200],
+                product_count=len(found),
+            )
         all_products.extend(found)
 
     seen: set[str] = set()
@@ -1119,47 +1197,59 @@ def validate_results(
     """
     garbage = get_garbage_names()
     valid: list[ProductResult] = []
+    rejection_reasons: dict[str, int] = {}
+
+    def _reject(reason: str) -> None:
+        rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
 
     for p in products:
-        # Name checks
         if not p.name or len(p.name) < 3:
+            _reject("name_too_short")
             continue
         if p.name.strip() in garbage:
+            _reject("garbage_name")
             continue
-        # Reject very short generic names (likely nav items)
         if len(p.name) < 5 and not p.model_id:
+            _reject("generic_short_name")
             continue
 
-        # Price sanity
         if p.sellers and all(
             s.price is not None and (s.price > _MAX_SANE_PRICE or s.price < 0)
             for s in p.sellers
         ):
+            _reject("insane_price")
             continue
 
-        # Must have at least a name and either a price or a URL
         has_price = any(s.price is not None and s.price > 0 for s in p.sellers)
         has_url = any(s.url for s in p.sellers)
         if not has_price and not has_url:
+            _reject("no_price_or_url")
             continue
 
         valid.append(p)
 
     # Batch-level quality checks
     if _is_low_quality_batch(valid):
+        _extraction_event("validate", f"Batch rejected as low-quality (all {len(valid)} products share same name with no prices)", rejection_reasons=str(rejection_reasons))
         return []
 
-    # Duplicate name check: if >50% share the same name, likely wrong selector
     if len(valid) > 3:
         names = [p.name for p in valid]
         most_common = max(set(names), key=names.count)
         if names.count(most_common) > len(names) * 0.5:
-            # Only reject if names are short/generic (not a comparison page)
             if len(most_common) < 30 and not any(
                 s.price is not None and s.price > 0
                 for p in valid for s in p.sellers
             ):
+                _extraction_event("validate", f"Batch rejected: >50% share name '{most_common[:40]}' with no prices")
                 return []
+
+    _extraction_event("validate",
+        f"{len(products)} input -> {len(valid)} valid, rejected: {rejection_reasons}" if rejection_reasons else f"All {len(valid)} products passed validation",
+        input_count=len(products),
+        valid_count=len(valid),
+        rejection_reasons=str(rejection_reasons),
+    )
 
     return valid
 
@@ -1256,3 +1346,139 @@ def _extract_domain(url: str) -> str:
     if domain.startswith("www."):
         domain = domain[4:]
     return domain
+
+
+# ===================================================================
+# LLM-based product extraction (last-resort for product pages)
+# ===================================================================
+
+_LLM_PRODUCT_EXTRACT_PROMPT = """\
+You are a product data extractor. Given a DOM snapshot of a product page, \
+extract the main product's name and price.
+
+Return ONLY a valid JSON object (no markdown, no explanation):
+{"name": "full product name", "price": 123.45, "currency": "EUR", "model_id": "ABC-123"}
+
+Rules:
+- Extract the MAIN product on the page (not accessories or related products).
+- Use the actual selling price (not crossed-out/original/was prices).
+- price is a number (no currency symbol). Set to null if not visible.
+- currency is a 3-letter code (EUR, USD, ILS, GBP, etc.).
+- model_id is the SKU/model number if visible, otherwise empty string.
+- Do not invent data — only extract what is visible."""
+
+
+async def _extract_product_via_llm(
+    page: Page,
+    product_query: str,
+    url: str,
+    domain: str,
+) -> ProductResult | None:
+    """Use LLM to extract the main product from a product page.
+
+    Last-resort fallback when structured methods fail to find a price.
+    """
+    import litellm
+
+    from src.mcp_servers.web_scraper_mcp.strategy import _build_dom_snapshot
+    from src.shared.config import settings
+
+    model = settings.scraper_llm_model or settings.llm_model
+    api_key = settings.llm_api_key
+    is_local = model.startswith("ollama/")
+    if not api_key and not is_local:
+        return None
+
+    snapshot = await _build_dom_snapshot(page)
+    if not snapshot:
+        return None
+
+    logger.info("LLM product extraction for '%s' on %s (model=%s)", product_query, domain, model)
+
+    with operation_span(
+        _tracer, "llm_product_extract",
+        input=product_query,
+    ) as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("domain", domain)
+        span.set_attribute("snapshot_length", len(snapshot))
+
+        user_prompt = (
+            f"Product query: {product_query}\n"
+            f"Page URL: {url}\n\n"
+            f"DOM snapshot:\n{snapshot}"
+        )
+        span.set_attribute("llm.system_prompt", _LLM_PRODUCT_EXTRACT_PROMPT)
+        span.set_attribute("llm.user_prompt", user_prompt[:2000])
+
+        try:
+            llm_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _LLM_PRODUCT_EXTRACT_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.0,
+            }
+            if api_key:
+                llm_kwargs["api_key"] = api_key
+            response = await litellm.acompletion(**llm_kwargs)
+            raw = (response.choices[0].message.content or "").strip()
+            usage = response.get("usage") or {}
+            set_span_token_counts(
+                span,
+                input_tokens=usage.get("prompt_tokens", 0),
+                output_tokens=usage.get("completion_tokens", 0),
+            )
+        except Exception as exc:
+            logger.warning("LLM product extraction failed", exc_info=True)
+            span.set_attribute("summary", f"LLM call failed: {type(exc).__name__}: {str(exc)[:200]}")
+            return None
+
+        span.set_attribute("llm.raw_response", raw[:1000])
+
+        # Parse JSON
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        try:
+            item = _json.loads(raw)
+        except _json.JSONDecodeError:
+            logger.warning("LLM extraction returned invalid JSON: %s", raw[:200])
+            span.set_attribute("summary", f"LLM returned invalid JSON")
+            return None
+
+        if not isinstance(item, dict):
+            span.set_attribute("summary", "LLM returned non-dict JSON")
+            return None
+
+        name = (item.get("name") or "").strip()
+        if not name or len(name) < 5:
+            span.set_attribute("summary", f"LLM extracted name too short: '{name}'")
+            return None
+
+        price = item.get("price")
+        if isinstance(price, str):
+            price = _parse_price(price)
+        if isinstance(price, (int, float)) and price <= 0:
+            price = None
+
+        default_currency = get_default_currency_for_domain(domain)
+        currency = (item.get("currency") or default_currency or "").strip().upper()
+        model_id = (item.get("model_id") or "").strip()
+
+        logger.info("LLM extracted: name='%s' price=%s %s from %s", name[:60], price, currency, domain)
+        span.set_attribute("summary",
+            f"Extracted '{name[:60]}' price={price} {currency} model={model_id} from {domain}")
+
+        return ProductResult(
+            name=name,
+            model_id=model_id,
+            brand="",
+            image_url="",
+            sellers=[Seller(
+                name=domain,
+                price=price,
+                currency=currency,
+                url=url,
+            )],
+        )
