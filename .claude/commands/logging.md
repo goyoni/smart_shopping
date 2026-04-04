@@ -126,32 +126,95 @@ with agent_span(tracer, "MainAgent", input=query, model="gpt-4") as span:
 - **DO NOT** log LLM calls without `llm.model`, `llm.system_prompt`, `llm.user_prompt`, and token counts.
 - **DO NOT** use `_tracer.start_as_current_span()` directly when the helpers exist — prefer `agent_span`, `operation_span`, `subagent_span`.
 
+## Verbose Tracing Goal
+
+The trace must be **verbose enough to fully debug the agent flow** without reading source code. A developer should be able to open a Phoenix trace and understand: what the agent decided, why it decided it, what data it saw, and what went wrong — all from the trace alone.
+
+### What Must Be Traced
+
+1. **Every LLM call** — wrap in `operation_span` with `llm.model`, `llm.user_prompt`, `llm.system_prompt`, response text, and token counts via `set_span_token_counts()`.
+
+2. **Every pipeline stage** — each extraction method, search method, or processing step gets a span event showing what it tried and what it found. Use lightweight `span.add_event()` for these (not full child spans).
+
+3. **Every major decision / if-else branch** — when the code picks path A over path B, record why. Examples:
+   - `decision.query_type`: "model IDs detected: ['X', 'Y']" vs "natural language query"
+   - `decision.sites_to_scrape`: "selected 5 sites: [domains] (3 ecommerce confidence>0.5, 2 aggregators)"
+   - `decision.access_method`: "using cached httpx strategy (cache hit)" vs "trying playwright (no cache)"
+   - `decision.relevance_filter`: "kept 3/8 products (dropped: wrong category, no price, ...)"
+
+4. **Every network request outcome** — HTTP status, rate-limit detection (captcha, unusual traffic), redirect chains, error details.
+
+5. **Every extraction method result** — for each method in the extraction pipeline (data_attrs, jsonld, jsonld_itemlist, microdata, og_meta, css_listing, css_strategy, api_intercept, jsonld_js, rendered_html, llm_extract), record products found or "0 products".
+
+6. **Strategy discovery cascade** — which CSS selectors were tried, which matched, whether LLM fallback was needed, what the LLM returned.
+
+7. **Post-processing reasoning** — relevance filtering (what was kept/dropped and why), seller merge logic (why products were/weren't merged), aggregation grouping stats.
+
+### The `summary` Attribute Convention
+
+**Every span MUST have a `summary` attribute** — a human-readable one-liner that captures the outcome. This is the single most important attribute for trace debugging. Examples:
+
+```python
+span.set_attribute("summary", "Translated 'מקרר' → 'refrigerator' (he→en)")
+span.set_attribute("summary", "DuckDuckGo: 8 results, 5 ecommerce (top: skroutz.gr, public.gr)")
+span.set_attribute("summary", "Strategy: css_candidates found container=div.product-card, price=span.price")
+span.set_attribute("summary", "Extracted 12 products (css_strategy:8, api_intercept:4), 9 priced")
+span.set_attribute("summary", "Relevance: kept 5/12 (dropped 7: wrong category)")
+```
+
+### Span Event Naming Conventions
+
+Use dotted namespaces for events:
+- `pipeline.*` — scraper pipeline stages (e.g., `pipeline.httpx_attempt`, `pipeline.relevance_filter`)
+- `strategy.*` — strategy discovery (e.g., `strategy.css_candidates`, `strategy.llm_fallback`)
+- `extraction.*` — data extraction (e.g., `extraction.jsonld`, `extraction.css_strategy`)
+- `processor.*` — results processing (e.g., `processor.validate`, `processor.aggregate`)
+- `decision.*` — major branching decisions (e.g., `decision.query_type`, `decision.sites_to_scrape`)
+- `nav.*` — product URL navigation (e.g., `nav.found`, `nav.not_found`)
+- `browser.*` — browser lifecycle (e.g., `browser.connected`, `browser.remote_failed`)
+- `ecommerce.*` — ecommerce classification (e.g., `ecommerce.classification`)
+
+### Existing Event Helpers
+
+Several modules define lightweight event helpers that write to both stderr and the OTEL span. Follow this pattern:
+
+```python
+# In scraper.py
+def _pipeline_event(step, detail, **attrs):
+    span = otel_trace.get_current_span()
+    if span and span.is_recording():
+        span.add_event(f"pipeline.{step}", {"detail": detail, **attrs})
+
+# In extractors.py
+def _extraction_event(step, detail, **attrs):
+    ...
+
+# In processor.py
+def _processor_event(step, detail, **attrs):
+    ...
+```
+
+When adding tracing to a new module, create a similar `_<module>_event()` helper.
+
 ## Steps
 
-1. Read the existing `src/shared/logging.py` to understand current utilities and config.
-2. Read `docs/product_guideline.md` for the full logging specification.
-3. Implement or update the shared logging infrastructure following these rules:
-   - Provide a `get_logger(name: str)` factory that returns a configured Python logger.
-   - Provide a `get_tracer(name: str)` factory that returns an OpenTelemetry tracer.
-   - Provide `set_session_id(session_id: str)` and `get_session_id() -> str` context utilities using `contextvars`.
-   - Provide `agent_span`, `operation_span`, `subagent_span` context managers for hierarchical agentic tracing.
-   - Provide `set_span_token_counts` for recording LLM token usage.
-   - Automatically attach `session_id` to all log records and span attributes.
-   - Environment-aware formatting:
-     - `LOG_FORMAT=console` (local): colorized, human-readable console output.
-     - `LOG_FORMAT=json` (dev/prod): structured JSON log lines.
-   - OTEL exporter configuration via environment variables (`OTEL_EXPORTER_*`).
-   - In development, spans export to console. In production, configure via `OTEL_EXPORTER_OTLP_ENDPOINT`.
-   - Never log sensitive data (user credentials, PII, API keys).
-4. When updating agent code to use the new convention, follow the hierarchical span pattern:
-   - Replace `add_event("X.start")` / `add_event("X.end")` pairs with `operation_span("X")`
-   - Replace bare `start_as_current_span` calls with the appropriate helper
-   - Ensure every LLM call records model, prompts, and token counts
-5. Run tests after making changes:
+1. Read `src/shared/logging.py` to understand the tracing infrastructure (`get_tracer`, `operation_span`, `agent_span`, `set_span_token_counts`).
+2. Read the target module(s) to identify all decision points, LLM calls, pipeline stages, and error paths.
+3. Add tracing following the rules above. For each module:
+   - Add `otel_trace` import and `get_tracer`/`operation_span`/`set_span_token_counts` as needed
+   - Wrap LLM calls in `operation_span` with full prompt/response/token recording
+   - Add span events at every pipeline stage and decision point
+   - Add `summary` attribute on every span
+   - Create a `_<module>_event()` helper if the module doesn't have one
+4. Verify all modified modules import cleanly:
+   ```bash
+   python -c "import src.module.path"
+   ```
+5. Run tests:
    ```bash
    pytest tests/unit -v
    ```
-6. Print a summary of what you changed and why.
+6. Print a summary of what you added and which decision points are now traced.
 
 ## Conventions
 
