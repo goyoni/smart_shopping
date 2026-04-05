@@ -18,6 +18,7 @@ from src.shared.market_config import (
     get_browser_languages,
     get_browser_timezone,
 )
+from src.shared.proxy import get_playwright_proxy
 
 logger = get_logger(__name__)
 
@@ -110,6 +111,7 @@ async def get_browser() -> AsyncIterator[Browser]:
 @asynccontextmanager
 async def get_page(
     browser: Browser, locale: str = "en-US", market: str = "il",
+    *, use_proxy: bool = True,
 ) -> AsyncIterator[Page]:
     """Create a new page with realistic viewport settings.
 
@@ -133,6 +135,12 @@ async def get_page(
     if geo:
         ctx_kwargs["geolocation"] = geo
         ctx_kwargs["permissions"] = ["geolocation"]
+
+    if use_proxy:
+        proxy = get_playwright_proxy(market)
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+            ctx_kwargs["ignore_https_errors"] = True
 
     context = await browser.new_context(**ctx_kwargs)
 

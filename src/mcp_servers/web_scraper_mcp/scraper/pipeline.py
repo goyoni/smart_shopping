@@ -49,6 +49,7 @@ async def scrape_page(
     product_query: str = "",
     *,
     locale: str = "en-US",
+    market: str = "us",
     criteria: dict[str, dict] | None = None,
 ) -> list[ProductResult]:
     """Scrape a product page using an adaptive pipeline.
@@ -99,16 +100,19 @@ async def scrape_page(
                 result = await _attempt_http_listing_then_product(
                     url, product_query, domain, page_type,
                     access_method, cached, cached_product,
+                    market=market,
                 )
             else:
                 result = await _attempt_http(
                     url, product_query, domain, "product",
                     access_method, cached,
+                    market=market,
                 )
         else:
             result = await _attempt_playwright(
                 browser, url, product_query, domain, page_type,
                 locale, criteria, cached, cached_product,
+                market=market,
             )
 
         if result.success:

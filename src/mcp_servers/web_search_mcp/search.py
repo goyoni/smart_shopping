@@ -14,6 +14,7 @@ from opentelemetry import trace
 
 from src.shared.config import settings
 from src.shared.logging import get_logger, get_tracer, operation_span, set_span_token_counts
+from src.shared.proxy import get_proxy_for_market
 from src.shared.market_config import (
     get_buy_online_suffix,
     get_google_domain,
@@ -261,6 +262,7 @@ async def _run_single_search(
     url: str,
     query: str,
     *,
+    market: str = "us",
     _max_attempts: int = 2,
 ) -> list[SearchResult]:
     """Execute one DuckDuckGo HTML search and return parsed results."""
@@ -269,12 +271,15 @@ async def _run_single_search(
         input=query,
         search_url=url,
     ) as span:
+        proxy = get_proxy_for_market(market)
         for attempt in range(1, _max_attempts + 1):
             try:
                 async with AsyncSession(
                     timeout=_REQUEST_TIMEOUT,
                     headers=_REQUEST_HEADERS,
                     impersonate="chrome",
+                    proxy=proxy,
+                    verify=proxy is None,
                 ) as client:
                     response = await client.get(url, allow_redirects=True)
             except Exception as exc:
@@ -374,9 +379,9 @@ async def search_products(
             span.set_attribute("translated_query", translated)
 
             # Run searches sequentially to avoid DuckDuckGo rate-limiting
-            primary_results = await _run_single_search(url, query, _max_attempts=_max_attempts)
+            primary_results = await _run_single_search(url, query, market=market, _max_attempts=_max_attempts)
             await asyncio.sleep(1.0)
-            local_results = await _run_single_search(local_url, translated, _max_attempts=_max_attempts)
+            local_results = await _run_single_search(local_url, translated, market=market, _max_attempts=_max_attempts)
 
             # Merge: local results first (deduped by URL)
             seen_urls: set[str] = set()
@@ -398,7 +403,7 @@ async def search_products(
             return merged
 
     # Single search (market matches query language)
-    results = await _run_single_search(url, query, _max_attempts=_max_attempts)
+    results = await _run_single_search(url, query, market=market, _max_attempts=_max_attempts)
     span.set_attribute("result_count", len(results))
     if not results:
         span.set_attribute("exit_reason", "no_results_extracted")
@@ -430,7 +435,15 @@ async def search_products_via_browser(
     search_text = refined_query or query
     google_domain = get_google_domain(market)
     suffix = get_buy_online_suffix(language=language, market=market)
-    search_url = f"https://www.{google_domain}/search?q={quote_plus(f'{search_text} {suffix}')}"
+    # Use gl/hl params to get geo-localized results without needing a
+    # proxy (many proxy providers block Google for non-KYC accounts).
+    search_lang = get_market_language(market) or language
+    search_url = (
+        f"https://www.{google_domain}/search"
+        f"?q={quote_plus(f'{search_text} {suffix}')}"
+        f"&gl={market}"
+        f"&hl={search_lang}"
+    )
 
     locale = f"{language}-{market.upper()}"
     market_lang = get_market_language(market)
@@ -444,8 +457,18 @@ async def search_products_via_browser(
     logger.info("Browser search: '%s' on %s (locale=%s)", search_text, google_domain, locale)
 
     try:
-        async with get_page(browser, locale=locale) as page:
+        # Skip proxy for Google — gl/hl params handle geo-targeting, and
+        # many proxy providers block Google for non-KYC accounts.
+        async with get_page(browser, locale=locale, market=market, use_proxy=False) as page:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+
+            # Detect Google CAPTCHA/sorry redirect
+            current_url = page.url
+            if "/sorry/" in current_url:
+                logger.warning("Google CAPTCHA detected, skipping browser search")
+                span.set_attribute("browser_search_error", "true")
+                span.set_attribute("browser_error_detail", "Google CAPTCHA/rate-limit detected")
+                return await search_products(query, language, market, refined_query=refined_query)
 
             # Accept Google consent if prompted
             from src.shared.browser import dismiss_consent
@@ -701,7 +724,7 @@ async def search_on_site(
         domain=domain,
         model_id=model_id,
     ) as span:
-        results = await _run_single_search(url, site_query)
+        results = await _run_single_search(url, site_query, market=market)
         filtered = [r for r in results if domain in r.url]
         span.set_attribute("raw_result_count", len(results))
         span.set_attribute("filtered_result_count", len(filtered))

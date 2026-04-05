@@ -16,8 +16,9 @@ from src.mcp_servers.web_scraper_mcp.diagnostics import (
 )
 from src.mcp_servers.web_scraper_mcp.extractors import extract_all_from_soup
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
+from src.shared.proxy import get_proxy_for_market
 
-from .helpers import _HTTP_HEADERS, _HTTP_TIMEOUT, _pipeline_event
+from .helpers import _HTTP_HEADERS, _HTTP_TIMEOUT, _pipeline_event, get_http_headers
 
 
 async def _attempt_http(
@@ -27,18 +28,23 @@ async def _attempt_http(
     page_type: str,
     access_method: str,
     cached: ScrapingStrategy | None,
+    market: str = "us",
 ) -> ExtractionResult:
     """Try to fetch and extract products via HTTP (no browser)."""
     html: str | None = None
     status_code: int | None = None
     error: Exception | None = None
+    headers = get_http_headers(market)
+    proxy = get_proxy_for_market(market)
 
     if access_method == "httpx":
         try:
             async with httpx.AsyncClient(
-                headers=_HTTP_HEADERS,
+                headers=headers,
                 follow_redirects=True,
                 timeout=_HTTP_TIMEOUT,
+                proxy=proxy,
+                verify=proxy is None,
             ) as client:
                 resp = await client.get(url)
                 status_code = resp.status_code
@@ -49,11 +55,11 @@ async def _attempt_http(
 
     elif access_method == "curl_cffi":
         try:
-            async with CurlSession() as session:
+            async with CurlSession(proxy=proxy, verify=proxy is None) as session:
                 resp_cf = await session.get(
                     url,
                     impersonate="chrome120",
-                    headers=_HTTP_HEADERS,
+                    headers=headers,
                     timeout=_HTTP_TIMEOUT,
                     allow_redirects=True,
                 )
@@ -115,10 +121,11 @@ async def _attempt_http_listing_then_product(
     access_method: str,
     cached: ScrapingStrategy | None,
     cached_product: ScrapingStrategy | None,
+    market: str = "us",
 ) -> ExtractionResult:
     """Two-step HTTP: fetch listing page, find product link, fetch product page."""
     # Step 1: Fetch listing HTML
-    html = await _fetch_html(url, access_method)
+    html = await _fetch_html(url, access_method, market=market)
     if not html or len(html) < 1000:
         _pipeline_event(domain, access_method, "listing fetch failed or too short")
         return ExtractionResult(
@@ -135,7 +142,7 @@ async def _attempt_http_listing_then_product(
         _pipeline_event(domain, access_method, "no product link found in listing HTML")
         return await _attempt_http(
             url, product_query, domain, page_type,
-            access_method, cached,
+            access_method, cached, market=market,
         )
 
     _pipeline_event(domain, access_method, f"found product link: {product_url[:120]}")
@@ -143,16 +150,19 @@ async def _attempt_http_listing_then_product(
     # Step 3: Fetch product page and extract
     return await _attempt_http(
         product_url, product_query, domain, "product",
-        access_method, cached_product,
+        access_method, cached_product, market=market,
     )
 
 
-async def _fetch_html(url: str, access_method: str) -> str | None:
+async def _fetch_html(url: str, access_method: str, *, market: str = "us") -> str | None:
     """Fetch raw HTML via httpx or curl_cffi."""
+    headers = get_http_headers(market)
+    proxy = get_proxy_for_market(market)
     if access_method == "httpx":
         try:
             async with httpx.AsyncClient(
-                headers=_HTTP_HEADERS, follow_redirects=True, timeout=_HTTP_TIMEOUT,
+                headers=headers, follow_redirects=True, timeout=_HTTP_TIMEOUT,
+                proxy=proxy, verify=proxy is None,
             ) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:
@@ -161,9 +171,9 @@ async def _fetch_html(url: str, access_method: str) -> str | None:
             return None
     elif access_method == "curl_cffi":
         try:
-            async with CurlSession() as session:
+            async with CurlSession(proxy=proxy, verify=proxy is None) as session:
                 resp = await session.get(
-                    url, impersonate="chrome120", headers=_HTTP_HEADERS,
+                    url, impersonate="chrome120", headers=headers,
                     timeout=_HTTP_TIMEOUT, allow_redirects=True,
                 )
                 if resp.status_code == 200:

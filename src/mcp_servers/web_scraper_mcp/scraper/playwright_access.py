@@ -40,9 +40,10 @@ async def _attempt_playwright(
     criteria: dict[str, dict] | None,
     cached: ScrapingStrategy | None,
     cached_product: ScrapingStrategy | None = None,
+    market: str = "us",
 ) -> ExtractionResult:
     """Fetch page via Playwright, navigate to product if needed, extract."""
-    async with get_page(browser, locale=locale) as page:
+    async with get_page(browser, locale=locale, market=market) as page:
         # Set up API response interception
         captured_responses: list[dict] = []
 

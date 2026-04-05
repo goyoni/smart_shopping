@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 from opentelemetry import trace as otel_trace
 
 from src.shared.logging import get_logger
+from src.shared.market_config import get_browser_languages
 
 logger = get_logger(__name__)
 
@@ -36,17 +37,42 @@ _IGNORE_DOMAINS = {
     "sentry.io", "newrelic.com", "segment.com", "mixpanel.com",
 }
 
+_HTTP_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 _HTTP_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": _HTTP_UA,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "he,en;q=0.9",
 }
 
 _HTTP_TIMEOUT = 15.0
+
+
+def get_http_headers(market: str) -> dict[str, str]:
+    """Return HTTP headers with Accept-Language matching *market*."""
+    langs = get_browser_languages(market)
+    if langs:
+        parts = []
+        for i, lang in enumerate(langs):
+            if i == 0:
+                parts.append(lang)
+            else:
+                q = round(0.9 - 0.1 * (i - 1), 1)
+                if q <= 0:
+                    break
+                parts.append(f"{lang};q={q}")
+        accept_lang = ",".join(parts)
+    else:
+        accept_lang = "en"
+    return {
+        "User-Agent": _HTTP_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": accept_lang,
+    }
 
 _BLOCKED_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "[::1]"}
 _BLOCKED_PREFIXES = ("10.", "172.16.", "172.17.", "172.18.", "172.19.",

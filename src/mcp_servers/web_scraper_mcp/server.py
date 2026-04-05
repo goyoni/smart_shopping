@@ -30,6 +30,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "What product to look for on the page",
                     },
+                    "market": {
+                        "type": "string",
+                        "description": "Two-letter market code for geo-proxy routing (e.g. il, us, gr)",
+                        "default": "us",
+                    },
                 },
                 "required": ["url"],
             },
@@ -98,8 +103,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "scrape_page":
         url = arguments["url"]
         product_query = arguments.get("product_query", "")
+        market = arguments.get("market", "us")
         async with get_browser() as browser:
-            products = await scrape_page(browser, url, product_query)
+            products = await scrape_page(browser, url, product_query, market=market)
         products_data = [p.model_dump() for p in products]
         return [TextContent(type="text", text=json.dumps({"products": products_data, "status": "ok"}))]
 
