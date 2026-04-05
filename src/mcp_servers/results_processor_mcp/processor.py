@@ -105,6 +105,7 @@ def validate_results(
         has_priced_seller = any(s.price is not None for s in product.sellers)
         if not has_priced_seller:
             warnings.append("no_price")
+            valid = False
 
         has_seller_url = any(s.url for s in product.sellers)
         if not has_seller_url:
