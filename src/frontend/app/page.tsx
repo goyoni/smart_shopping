@@ -107,7 +107,21 @@ export default function Home() {
     // Connect WebSocket before sending search request
     wsRef.current?.disconnect();
     const ws = new StatusWebSocket((message) => {
-      setStatusMessages((prev) => [...prev, message]);
+      setStatusMessages((prev) => {
+        // Update in-place if this is a progress update for the same step
+        // (messages sharing a prefix up to the counter, e.g. "Scraping product pages (2/8): ...")
+        const match = message.match(/^(.+?)\(\d+\/\d+\)/);
+        if (match) {
+          const prefix = match[1];
+          const idx = prev.findLastIndex((m) => m.startsWith(prefix));
+          if (idx !== -1) {
+            const updated = [...prev];
+            updated[idx] = message;
+            return updated;
+          }
+        }
+        return [...prev, message];
+      });
     });
     wsRef.current = ws;
     ws.connect(sessionId);
