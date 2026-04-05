@@ -287,7 +287,8 @@ class MainAgent:
                         "sites": json.dumps([{"domain": s.domain, "confidence": s.confidence, "signals": s.signals} for s in sites_to_scrape], ensure_ascii=False),
                         "summary": f"Scraping top {len(sites_to_scrape)}/{len(ecommerce_signals)} ecommerce sites: {', '.join(s.domain for s in sites_to_scrape)}",
                     })
-                    await self._add_status(f"Scraping {len(sites_to_scrape)} e-commerce sites...")
+                    total_sites = len(sites_to_scrape)
+                    await self._add_status(f"Scraping product pages (0/{total_sites})...")
 
                     locale = _build_locale(language, market)
 
@@ -300,16 +301,17 @@ class MainAgent:
                         site_count=len(sites_to_scrape),
                     ) as scrape_op:
                         all_products: list[ProductResult] = []
-                        for signal in sites_to_scrape:
+                        for idx, signal in enumerate(sites_to_scrape, 1):
                             try:
                                 with operation_span(
                                     _tracer, f"scrape_site:{signal.domain}",
                                     input=signal.url,
                                 ) as site_op:
-                                    await self._add_status(f"Scraping {signal.domain}...")
+                                    await self._add_status(f"Scraping product pages ({idx}/{total_sites}): {signal.domain}")
                                     products = await scrape_page(
                                         browser, signal.url, query,
                                         locale=locale,
+                                        market=market,
                                         criteria=criteria if criteria else None,
                                     )
                                     if category:

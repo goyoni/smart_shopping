@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 
 import litellm
 from opentelemetry import trace
@@ -73,6 +74,7 @@ async def _scrape_urls(
     locale: str,
     market: str,
     aggregator_domains: set[str] | None = None,
+    on_site_scraped: Callable[[str], Awaitable[None]] | None = None,
 ) -> list[ProductResult]:
     """Scrape a list of URLs and return products relevant to model_id."""
     from urllib.parse import urlparse as _urlparse
@@ -91,6 +93,8 @@ async def _scrape_urls(
                 scraped = await scrape_page(
                     browser, url, model_id, locale=locale, market=market,
                 )
+                if on_site_scraped:
+                    await on_site_scraped(domain)
                 # Filter to products matching the target model ID.
                 _search_indicators = (
                     "/search", "/find", "/results",
@@ -428,7 +432,20 @@ async def process_multi_model(
         # ------------------------------------------------------------------
         # Phase 2: Scrape all URLs in parallel per model
         # ------------------------------------------------------------------
-        await _add_status("Scraping product pages...")
+        # Count total URLs to scrape for progress tracking
+        total_urls = 0
+        for mid, urls_result in zip(model_ids, urls_per_model):
+            if not isinstance(urls_result, Exception) and urls_result:
+                total_urls += sum(1 for u in urls_result if _is_useful_url(u, mid))
+        scraped_counter: dict[str, int] = {"done": 0, "total": total_urls}
+        scrape_lock = asyncio.Lock()
+
+        async def _on_site_scraped(domain: str) -> None:
+            async with scrape_lock:
+                scraped_counter["done"] += 1
+                await _add_status(f"Scraping product pages ({scraped_counter['done']}/{scraped_counter['total']}): {domain}")
+
+        await _add_status(f"Scraping product pages (0/{total_urls})...")
         all_products: list[ProductResult] = []
 
         with operation_span(
@@ -442,7 +459,7 @@ async def process_multi_model(
                     logger.warning("Search failed for %s: %s", mid, urls_result)
                     continue
                 if urls_result:
-                    scrape_tasks.append(_scrape_urls(browser, urls_result, mid, locale, market, all_aggregator_domains))
+                    scrape_tasks.append(_scrape_urls(browser, urls_result, mid, locale, market, all_aggregator_domains, on_site_scraped=_on_site_scraped))
                     scrape_model_ids.append(mid)
 
             if scrape_tasks:
