@@ -205,7 +205,7 @@ async def test_main_agent_scrape_site_error_continues():
 
     call_count = 0
 
-    async def mock_scrape(browser, url, query, *, locale="en-US", criteria=None):
+    async def mock_scrape(browser, url, query, *, locale="en-US", market="us", criteria=None):
         nonlocal call_count
         call_count += 1
         if "amazon.com" in url:
@@ -330,7 +330,7 @@ async def test_pipeline_passes_locale_to_scraper():
 
     scrape_kwargs: dict = {}
 
-    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
+    async def capture_scrape(browser, url, query, *, locale="en-US", market="us", criteria=None):
         scrape_kwargs["locale"] = locale
         return []
 
@@ -380,7 +380,7 @@ async def test_pipeline_passes_criteria_to_scraper():
 
     scrape_kwargs: dict = {}
 
-    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
+    async def capture_scrape(browser, url, query, *, locale="en-US", market="us", criteria=None):
         scrape_kwargs["criteria"] = criteria
         return []
 
@@ -474,7 +474,7 @@ async def test_pipeline_boosts_criteria_importance():
 
     scrape_kwargs: dict = {}
 
-    async def capture_scrape(browser, url, query, *, locale="en-US", criteria=None):
+    async def capture_scrape(browser, url, query, *, locale="en-US", market="us", criteria=None):
         scrape_kwargs["criteria"] = criteria
         return []
 
