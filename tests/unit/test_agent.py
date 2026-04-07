@@ -109,7 +109,7 @@ async def test_main_agent_successful_pipeline():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results) as mock_search,
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results) as mock_search,
         patch("src.agents.main_agent.scrape_page", return_value=mock_products) as mock_scrape,
     ):
         mock_ctx = AsyncMock()
@@ -132,7 +132,7 @@ async def test_main_agent_successful_pipeline():
 async def test_main_agent_no_search_results():
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=[]),
     ):
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -157,7 +157,7 @@ async def test_main_agent_no_ecommerce_sites():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
     ):
         mock_ctx = AsyncMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -195,8 +195,8 @@ async def test_main_agent_scrape_site_error_continues():
     mock_browser = AsyncMock()
 
     mock_search_results = [
-        SearchResult(url="https://www.amazon.com/dp/B1", title="Product A", snippet=""),
-        SearchResult(url="https://www.ebay.com/itm/2", title="Product B", snippet=""),
+        SearchResult(url="https://www.amazon.com/dp/B1", title="Product A", snippet="buy now"),
+        SearchResult(url="https://www.ebay.com/item/2", title="Product B", snippet="buy $99"),
     ]
 
     mock_products = [
@@ -214,7 +214,7 @@ async def test_main_agent_scrape_site_error_continues():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=mock_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -239,7 +239,7 @@ async def test_main_agent_status_callback():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_gb,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=[]),
     ):
         _ctx = AsyncMock()
         _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -258,7 +258,7 @@ async def test_main_agent_status_callback():
 async def test_main_agent_refine_search():
     with (
         patch("src.agents.main_agent.get_browser") as mock_gb,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=[]),
     ):
         _ctx = AsyncMock()
         _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -293,7 +293,7 @@ async def test_pipeline_calls_aggregate_and_format():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", return_value=mock_products),
         patch("src.agents.main_agent.aggregate_sellers", wraps=lambda x: x) as mock_agg,
         patch("src.agents.main_agent.format_results") as mock_fmt,
@@ -336,7 +336,7 @@ async def test_pipeline_passes_locale_to_scraper():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -355,7 +355,7 @@ async def test_pipeline_extracts_category():
     """Verify category is extracted and criteria are looked up."""
     with (
         patch("src.agents.main_agent.get_browser") as mock_gb,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=[]),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=[]),
     ):
         _ctx = AsyncMock()
         _ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -386,7 +386,7 @@ async def test_pipeline_passes_criteria_to_scraper():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -440,7 +440,7 @@ async def test_pipeline_extracts_query_attributes():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", side_effect=capture_search),
+        patch("src.agents.main_agent.search_products_via_searxng", side_effect=capture_search),
         patch("src.agents.main_agent.scrape_page", return_value=mock_products),
         patch("src.agents.main_agent.format_results", side_effect=capture_format),
     ):
@@ -480,7 +480,7 @@ async def test_pipeline_boosts_criteria_importance():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_get_browser,
-        patch("src.agents.main_agent.search_products_via_browser", return_value=mock_search_results),
+        patch("src.agents.main_agent.search_products_via_searxng", return_value=mock_search_results),
         patch("src.agents.main_agent.scrape_page", side_effect=capture_scrape),
     ):
         mock_ctx = AsyncMock()
@@ -507,7 +507,7 @@ async def test_pipeline_no_attributes_no_refined_query():
 
     with (
         patch("src.agents.main_agent.get_browser") as mock_gb,
-        patch("src.agents.main_agent.search_products_via_browser", side_effect=capture_search),
+        patch("src.agents.main_agent.search_products_via_searxng", side_effect=capture_search),
         patch("src.agents.main_agent.discover_criteria_via_llm", return_value={}),
         patch("src.agents.main_agent.extract_query_attributes_via_llm", return_value=[]),
         patch("src.agents.main_agent.get_cached", return_value=None),
