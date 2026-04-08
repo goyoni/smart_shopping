@@ -106,6 +106,28 @@ class AggregatorSite(Base):
     )
 
 
+class SiteSearchStrategy(Base):
+    """Per-domain search mechanism discovered via LLM analysis.
+
+    Stores how to search for products on a specific e-commerce site,
+    e.g. the search URL template or search input CSS selector.
+    """
+
+    __tablename__ = "site_search_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    strategy_type: Mapped[str] = mapped_column(String(20))  # "url_template" or "search_input"
+    search_url_template: Mapped[str] = mapped_column(Text, default="")  # e.g. https://site.com/search?q={query}
+    search_input_selector: Mapped[str] = mapped_column(Text, default="")  # CSS selector for search <input>
+    submit_selector: Mapped[str] = mapped_column(Text, default="")  # CSS selector for submit button (optional)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ConsentSelector(Base):
     """A cached CSS selector for dismissing cookie/consent banners on a domain."""
 

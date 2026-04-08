@@ -29,7 +29,7 @@ from src.mcp_servers.results_processor_mcp.processor import (
 from src.mcp_servers.web_search_mcp.ecommerce_detector import identify_ecommerce_sites
 from src.mcp_servers.web_search_mcp.search import (
     build_refined_query,
-    search_products_via_browser,
+    search_products_via_searxng,
 )
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.shared.browser import get_browser
@@ -214,8 +214,8 @@ class MainAgent:
                     ) as search_op:
                         if refined:
                             search_op.set_attribute("refined_query", refined)
-                        search_results = await search_products_via_browser(
-                            browser, query, language, market, refined_query=refined,
+                        search_results = await search_products_via_searxng(
+                            query, language, market, refined_query=refined,
                         )
                         search_op.set_attribute("result_count", len(search_results))
                         search_op.set_attribute(

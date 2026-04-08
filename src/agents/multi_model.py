@@ -25,12 +25,16 @@ from src.mcp_servers.web_search_mcp.ecommerce_detector import (
     identify_ecommerce_sites,
     record_domain_success,
 )
+from src.mcp_servers.web_scraper_mcp.site_search import (
+    discover_site_search_via_homepage,
+    get_cached_site_search,
+    search_within_site,
+)
 from src.mcp_servers.web_search_mcp.search import (
     discover_aggregators,
     get_aggregator_urls,
-    search_on_site,
     search_products,
-    search_products_via_browser,
+    search_products_via_searxng,
 )
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
 from src.shared.config import settings
@@ -65,6 +69,78 @@ def _is_useful_url(url: str, model_id: str) -> bool:
         return False
 
     return True
+
+
+async def _websearch_site_fallback(
+    browser: object,
+    domain: str,
+    model_id: str,
+    locale: str,
+    market: str,
+) -> list[ProductResult]:
+    """Search 'MODEL_ID site:domain' via web search and scrape results.
+
+    Used when a domain has no site search strategy — we search the web
+    for product pages on that specific domain instead.
+    """
+    site_query = f"{model_id} site:{domain}"
+
+    with operation_span(
+        _tracer, f"websearch_site_fallback:{domain}",
+        input=json.dumps({"domain": domain, "model_id": model_id}),
+    ) as span:
+        try:
+            # Try SearXNG first, fall back to DDG
+            results = await asyncio.wait_for(
+                search_products_via_searxng(site_query, "en", market),
+                timeout=10,
+            )
+            if not results:
+                results = await asyncio.wait_for(
+                    search_products(site_query, "en", market, _max_attempts=1),
+                    timeout=10,
+                )
+        except Exception as exc:
+            span.set_attribute("summary", f"Web search failed: {exc}")
+            return []
+
+        if not results:
+            span.set_attribute("summary", "No web search results")
+            return []
+
+        # Filter to URLs actually on this domain
+        urls = [
+            r.url for r in results
+            if domain in (r.url or "")
+        ][:3]  # Limit to top 3 to avoid excessive scraping
+
+        if not urls:
+            span.set_attribute("summary", "No on-domain URLs in search results")
+            return []
+
+        span.set_attribute("urls_to_scrape", json.dumps(urls))
+
+        products: list[ProductResult] = []
+        for url in urls:
+            try:
+                scraped = await scrape_page(
+                    browser, url, model_id, locale=locale, market=market,
+                )
+                for p in scraped:
+                    mid_lower = model_id.lower()
+                    if (
+                        mid_lower in p.name.lower()
+                        or (p.model_id and mid_lower in p.model_id.lower())
+                    ):
+                        p.product_type = model_id
+                        products.append(p)
+            except Exception:
+                continue
+
+        span.set_attribute("summary",
+            f"site:{domain} search for '{model_id}': {len(urls)} URLs -> {len(products)} products")
+        span.set_attribute("product_count", len(products))
+        return products
 
 
 async def _scrape_urls(
@@ -320,26 +396,26 @@ async def process_multi_model(
                     model_op.set_attribute("enriched_name", enriched_name or "")
                     search_mode = "dual"
 
-                    # Dual-source: browser (Google) + HTTP (DDG) in parallel
-                    browser_task = search_products_via_browser(
-                        browser, model_id, language, market,
+                    # Dual-source: SearXNG (meta-search) + HTTP (DDG) in parallel
+                    searxng_task = search_products_via_searxng(
+                        model_id, language, market,
                     )
                     ddg_task = search_products(model_id, language, market)
-                    tasks = [browser_task, ddg_task]
+                    tasks = [searxng_task, ddg_task]
 
                     # If enriched, add a second pair of searches with the full name
                     if enriched_name:
                         search_mode = "dual+enriched"
-                        tasks.append(search_products_via_browser(
-                            browser, enriched_name, language, market,
+                        tasks.append(search_products_via_searxng(
+                            enriched_name, language, market,
                         ))
                         tasks.append(search_products(enriched_name, language, market))
 
                     search_results = await asyncio.gather(*tasks, return_exceptions=True)
-                    browser_results = search_results[0]
+                    searxng_results = search_results[0]
                     ddg_results = search_results[1]
 
-                    # Merge results: browser first, then DDG, then enriched, dedup by URL
+                    # Merge results: SearXNG first, then DDG, then enriched, dedup by URL
                     results = []
                     seen_urls: set[str] = set()
                     for source in search_results:
@@ -352,8 +428,8 @@ async def process_multi_model(
                                 results.append(r)
 
                     model_op.set_attribute("search_mode", search_mode)
-                    model_op.set_attribute("browser_result_count",
-                        len(browser_results) if not isinstance(browser_results, Exception) else 0)
+                    model_op.set_attribute("searxng_result_count",
+                        len(searxng_results) if not isinstance(searxng_results, Exception) else 0)
                     model_op.set_attribute("ddg_result_count",
                         len(ddg_results) if not isinstance(ddg_results, Exception) else 0)
                     model_op.set_attribute("merged_result_count", len(results))
@@ -499,28 +575,97 @@ async def process_multi_model(
                     fill_op.set_attribute("summary",
                         f"Cross-seller filling: {len(missing)} sellers have gaps. "
                         + ", ".join(f"{d}: missing {ids}" for d, ids in list(missing.items())[:5]))
-                    fill_tasks = []
-                    fill_meta: list[tuple[str, str]] = []
+
+                    # Step 1: Discover site search strategies for all
+                    # domains that don't have one yet (in parallel).
+                    domains_needing_discovery = [
+                        d for d in missing
+                        if not await get_cached_site_search(d)
+                    ]
+                    if domains_needing_discovery:
+                        discovery_tasks = [
+                            discover_site_search_via_homepage(
+                                browser, d, locale=locale, market=market,
+                            )
+                            for d in domains_needing_discovery
+                        ]
+                        await asyncio.gather(*discovery_tasks, return_exceptions=True)
+
+                    # Step 2: Check which domains now have strategies
+                    domains_with_strategy: set[str] = set()
+                    domains_without: set[str] = set()
+                    for domain in missing:
+                        if await get_cached_site_search(domain):
+                            domains_with_strategy.add(domain)
+                        else:
+                            domains_without.add(domain)
+
+                    fill_op.set_attribute("domains_with_site_search",
+                        json.dumps(list(domains_with_strategy)))
+                    fill_op.set_attribute("domains_without_site_search",
+                        json.dumps(list(domains_without)))
+
+                    # Step 3: Search for missing models using site
+                    # search strategies (all direct, no DDG).
+                    search_tasks = []
+                    search_meta: list[tuple[str, str]] = []
 
                     for domain, missing_ids in missing.items():
+                        if domain not in domains_with_strategy:
+                            continue
                         for mid in missing_ids:
-                            fill_tasks.append(
-                                search_on_site(mid, domain, language, market)
+                            search_tasks.append(
+                                search_within_site(
+                                    browser, domain, mid,
+                                    locale=locale, market=market,
+                                )
                             )
-                            fill_meta.append((domain, mid))
+                            search_meta.append((domain, mid))
 
-                    fill_results = await asyncio.gather(*fill_tasks, return_exceptions=True)
+                    if search_tasks:
+                        search_results = await asyncio.gather(
+                            *search_tasks, return_exceptions=True,
+                        )
+                        for (domain, mid), result in zip(search_meta, search_results):
+                            if isinstance(result, Exception):
+                                logger.warning(
+                                    "Site search failed for %s on %s: %s",
+                                    mid, domain, result,
+                                )
+                                continue
+                            all_products.extend(result)
 
-                    for (domain, mid), result in zip(fill_meta, fill_results):
-                        if isinstance(result, Exception):
-                            logger.warning("Site search failed for %s on %s: %s", mid, domain, result)
-                            continue
-                        if not result:
-                            continue
+                    # Step 4: Web-search fallback for domains with no
+                    # site search strategy.  Search "MODEL_ID site:domain"
+                    # via SearXNG/DDG to find product pages directly.
+                    websearch_meta: list[tuple[str, str]] = []
+                    websearch_tasks: list = []
+                    if domains_without:
+                        fill_op.add_event("web_search_fallback", {
+                            "domains": list(domains_without)[:10],
+                        })
+                        for domain in domains_without:
+                            for mid in missing[domain]:
+                                websearch_tasks.append(
+                                    _websearch_site_fallback(
+                                        browser, domain, mid,
+                                        locale, market,
+                                    )
+                                )
+                                websearch_meta.append((domain, mid))
 
-                        urls_to_scrape = [r.url for r in result[:3]]
-                        filled = await _scrape_urls(browser, urls_to_scrape, mid, locale, market)
-                        all_products.extend(filled)
+                    if websearch_tasks:
+                        ws_results = await asyncio.gather(
+                            *websearch_tasks, return_exceptions=True,
+                        )
+                        for (domain, mid), result in zip(websearch_meta, ws_results):
+                            if isinstance(result, Exception):
+                                logger.warning(
+                                    "Web-search fallback failed for %s on %s: %s",
+                                    mid, domain, result,
+                                )
+                                continue
+                            all_products.extend(result)
 
                     # Re-aggregate after filling
                     if all_products:
@@ -528,6 +673,11 @@ async def process_multi_model(
 
                     fill_op.set_attribute("output", json.dumps({
                         "product_count": len(all_products),
+                        "direct_searches": len(search_meta),
+                        "websearch_fallbacks": len(websearch_meta),
+                        "domains_discovered": len(domains_needing_discovery),
+                        "domains_with_strategy": len(domains_with_strategy),
+                        "domains_without_strategy": len(domains_without),
                     }))
 
     # ------------------------------------------------------------------
