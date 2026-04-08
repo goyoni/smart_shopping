@@ -27,6 +27,8 @@ from src.mcp_servers.web_scraper_mcp.strategy import (
 )
 from src.shared.browser import get_page
 
+from src.mcp_servers.web_scraper_mcp.site_search import discover_site_search
+
 from .helpers import _IGNORE_DOMAINS, _pipeline_event
 
 
@@ -41,9 +43,50 @@ async def _attempt_playwright(
     cached: ScrapingStrategy | None,
     cached_product: ScrapingStrategy | None = None,
     market: str = "us",
+    cached_listing: ScrapingStrategy | None = None,
 ) -> ExtractionResult:
-    """Fetch page via Playwright, navigate to product if needed, extract."""
-    async with get_page(browser, locale=locale, market=market) as page:
+    """Fetch page via Playwright, navigate to product if needed, extract.
+
+    Tries direct access first.  If the site blocks us (Cloudflare, WAF),
+    retries through the residential proxy when one is configured.
+    """
+    result = await _do_playwright_attempt(
+        browser, url, product_query, domain, page_type,
+        locale, criteria, cached, cached_product, market,
+        cached_listing, use_proxy=False,
+    )
+    if result.success or not result.is_blocked:
+        return result
+
+    # Blocked — retry with proxy if available
+    from src.shared.proxy import get_proxy_for_market
+    if not get_proxy_for_market(market):
+        return result
+
+    _pipeline_event(domain, "playwright", "blocked without proxy, retrying with proxy")
+    return await _do_playwright_attempt(
+        browser, url, product_query, domain, page_type,
+        locale, criteria, cached, cached_product, market,
+        cached_listing, use_proxy=True,
+    )
+
+
+async def _do_playwright_attempt(
+    browser: Browser,
+    url: str,
+    product_query: str,
+    domain: str,
+    page_type: str,
+    locale: str,
+    criteria: dict[str, dict] | None,
+    cached: ScrapingStrategy | None,
+    cached_product: ScrapingStrategy | None,
+    market: str,
+    cached_listing: ScrapingStrategy | None,
+    use_proxy: bool,
+) -> ExtractionResult:
+    """Single Playwright attempt (with or without proxy)."""
+    async with get_page(browser, locale=locale, market=market, use_proxy=use_proxy) as page:
         # Set up API response interception
         captured_responses: list[dict] = []
 
@@ -83,45 +126,98 @@ async def _attempt_playwright(
         await _wait_for_content(page)
 
         is_listing = page_type in ("search", "catalog")
+        result_page_type = page_type
+        products: list = []
+        winning_method = ""
 
-        # --- Step 2: If listing page, navigate to the product page ---
-        current_url = url
         if is_listing:
-            _pipeline_event(domain, "playwright", "listing page detected, finding product link...")
-            nav_selector = (cached.product_link_selector if cached else "") or ""
-            product_url = await find_product_url(
-                page, product_query, url, cached_selector=nav_selector,
-            )
-            if product_url:
-                _pipeline_event(domain, "playwright", f"navigating to product: {product_url[:120]}")
-                captured_responses.clear()
-                nav_error = await _playwright_navigate(page, product_url, domain, "product")
-                if nav_error:
-                    return nav_error
-                await _wait_for_content(page)
-                current_url = product_url
-                if nav_selector:
-                    await update_success_rate(domain, success=True, page_type=page_type)
-            else:
-                _pipeline_event(domain, "playwright", "no product link found, extracting from listing as fallback")
+            # --- Step 2a: If we have a cached listing strategy, try extracting
+            # directly from the listing page (skip product navigation). ---
+            if cached_listing and cached_listing.product_container:
+                _pipeline_event(domain, "playwright",
+                    f"trying cached listing strategy: container='{cached_listing.product_container[:60]}'")
+                products = await extract_with_strategy(page, cached_listing, url, criteria=criteria)
+                if products:
+                    winning_method = "css_strategy"
+                    result_page_type = "search"
+                    await update_success_rate(domain, success=True, page_type="search")
+                    _pipeline_event(domain, "playwright",
+                        f"cached listing strategy hit: {len(products)} products", product_count=len(products))
+                else:
+                    await update_success_rate(domain, success=False, page_type="search")
+                    _pipeline_event(domain, "playwright", "cached listing strategy miss")
 
-        # --- Step 3: Extract product data from the page ---
-        _pipeline_event(domain, "playwright", "extracting product data")
-        products, winning_method = await _extract_from_page(
-            page, current_url, domain, product_query,
-            captured_responses, criteria,
-            cached_product if is_listing else cached,
-            page_type,
-        )
+            # --- Step 2b: Try navigating to a product page ---
+            if not products:
+                _pipeline_event(domain, "playwright", "listing page: finding product link...")
+                nav_selector = (cached.product_link_selector if cached else "") or ""
+                product_url = await find_product_url(
+                    page, product_query, url, cached_selector=nav_selector,
+                )
+                if product_url:
+                    _pipeline_event(domain, "playwright", f"navigating to product: {product_url[:120]}")
+                    captured_responses.clear()
+                    nav_error = await _playwright_navigate(page, product_url, domain, "product")
+                    if nav_error:
+                        _pipeline_event(domain, "playwright",
+                            "product page navigation failed, will discover listing strategy")
+                    else:
+                        await _wait_for_content(page)
+                        # Extract from the product page
+                        _pipeline_event(domain, "playwright", "extracting from product page")
+                        products, winning_method = await _extract_from_page(
+                            page, product_url, domain, product_query,
+                            captured_responses, criteria,
+                            cached_product, "product",
+                        )
+                        if products:
+                            result_page_type = "product"
+                        if nav_selector and products:
+                            await update_success_rate(domain, success=True, page_type=page_type)
+
+            # --- Step 2c: Listing fallback — discover strategy on the listing page ---
+            if not products:
+                _pipeline_event(domain, "playwright",
+                    "no products from product page, discovering listing strategy")
+                # Navigate back to the listing page if we left it
+                if page.url != url:
+                    back_error = await _playwright_navigate(page, url, domain, page_type)
+                    if back_error:
+                        _pipeline_event(domain, "playwright", "failed to navigate back to listing")
+                    else:
+                        await _wait_for_content(page)
+
+                products, winning_method = await _extract_from_page(
+                    page, url, domain, product_query,
+                    captured_responses, criteria,
+                    None, "search",
+                )
+                if products:
+                    result_page_type = "search"
+        else:
+            # --- Non-listing: extract directly ---
+            _pipeline_event(domain, "playwright", "extracting product data")
+            products, winning_method = await _extract_from_page(
+                page, url, domain, product_query,
+                captured_responses, criteria,
+                cached, page_type,
+            )
+
+        # Discover site search strategy from any successfully loaded page
+        try:
+            await discover_site_search(page, domain)
+        except Exception:
+            pass  # Non-critical
 
         if products:
-            _pipeline_event(domain, "playwright", f"SUCCESS: {len(products)} products via {winning_method}", product_count=len(products))
+            _pipeline_event(domain, "playwright",
+                f"SUCCESS: {len(products)} products via {winning_method}", product_count=len(products))
             return ExtractionResult(
                 products=products,
                 access_method="playwright",
                 extraction_method=winning_method,
                 domain=domain,
-                page_type="product",
+                page_type=result_page_type,
             )
 
         # Classify why we got nothing
@@ -133,7 +229,8 @@ async def _attempt_playwright(
             body_length = 0
 
         failure = classify_playwright_failure(title, body_length)
-        _pipeline_event(domain, "playwright", f"FAILED: {failure.value if failure else 'unknown'} (title='{title[:80]}', body={body_length})")
+        _pipeline_event(domain, "playwright",
+            f"FAILED: {failure.value if failure else 'unknown'} (title='{title[:80]}', body={body_length})")
         return ExtractionResult(
             access_method="playwright",
             failure_type=failure,
@@ -282,7 +379,7 @@ async def _extract_from_page(
                     strategy.access_method = "playwright"
                     strategy.extraction_method = "css_strategy"
                     strategy.last_successful_url = url
-                    await save_strategy(domain, strategy, "product")
+                    await save_strategy(domain, strategy, page_type)
             elif winning_method == "api_intercept":
                 api_strategy = ScrapingStrategy(
                     product_container="",
@@ -291,7 +388,7 @@ async def _extract_from_page(
                     extraction_method="api_intercept",
                     last_successful_url=url,
                 )
-                await save_strategy(domain, api_strategy, "product")
+                await save_strategy(domain, api_strategy, page_type)
         else:
             _pipeline_event(domain, "playwright", f"extract_all returned 0 products (api_responses={len(captured_responses)})")
 

@@ -51,6 +51,7 @@ async def scrape_page(
     locale: str = "en-US",
     market: str = "us",
     criteria: dict[str, dict] | None = None,
+    page_type_hint: str = "",
 ) -> list[ProductResult]:
     """Scrape a product page using an adaptive pipeline.
 
@@ -62,9 +63,15 @@ async def scrape_page(
     5. Extract product data from the product page
        (JSON-LD / microdata / CSS strategy -> LLM discovery fallback)
     6. Validate and return
+
+    Args:
+        page_type_hint: Override auto-detection of page type. Callers like
+            ``search_within_site`` that *know* the URL is a search results
+            page can pass ``"search"`` to ensure the listing-then-product
+            flow is used.
     """
     domain = extract_domain(url)
-    page_type = _detect_page_type(url)
+    page_type = page_type_hint or _detect_page_type(url)
 
     if not _is_safe_url(url):
         return []
@@ -78,6 +85,20 @@ async def scrape_page(
         await get_cached_strategy(domain, "product")
         if page_type != "product" else cached
     )
+    # For listing pages, also load any cached listing-specific strategy
+    # so Playwright can extract directly from the listing without
+    # navigating to individual product pages.
+    cached_listing = (
+        await get_cached_strategy(domain, "search")
+        if page_type in ("search", "catalog") and page_type != "search"
+        else (cached if page_type == "search" else None)
+    )
+    # Fall back to the "product" strategy when no page-type-specific
+    # strategy exists.  Most product pages on the same domain share
+    # the same selectors regardless of how _detect_page_type classifies
+    # the URL.
+    if cached is None and cached_product is not None:
+        cached = cached_product
     pipeline = _build_pipeline(cached)
 
     last_failure: FailureType | None = None
@@ -112,13 +133,13 @@ async def scrape_page(
             result = await _attempt_playwright(
                 browser, url, product_query, domain, page_type,
                 locale, criteria, cached, cached_product,
-                market=market,
+                market=market, cached_listing=cached_listing,
             )
 
         if result.success:
             validated = validate_results(result.products, product_query, domain)
             if validated:
-                await _cache_success(domain, "product", result, url)
+                await _cache_success(domain, result.page_type, result, url)
                 return _post_process(validated, product_query, domain)
             else:
                 last_failure = FailureType.LOW_QUALITY

@@ -265,72 +265,79 @@ async def _run_single_search(
     market: str = "us",
     _max_attempts: int = 2,
 ) -> list[SearchResult]:
-    """Execute one DuckDuckGo HTML search and return parsed results."""
+    """Execute one DuckDuckGo HTML search and return parsed results.
+
+    Tries direct access first; falls back to proxy on failure.
+    """
     with operation_span(
         _tracer, "http_search",
         input=query,
         search_url=url,
     ) as span:
         proxy = get_proxy_for_market(market)
-        for attempt in range(1, _max_attempts + 1):
-            try:
-                async with AsyncSession(
-                    timeout=_REQUEST_TIMEOUT,
-                    headers=_REQUEST_HEADERS,
-                    impersonate="chrome",
-                    proxy=proxy,
-                    verify=proxy is None,
-                ) as client:
-                    response = await client.get(url, allow_redirects=True)
-            except Exception as exc:
-                logger.warning(
-                    "HTTP request failed for '%s' (attempt %d/%d)",
-                    query, attempt, _max_attempts,
-                )
-                span.add_event("search.http_error", {
-                    "attempt": attempt,
-                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
-                })
-                if attempt == _max_attempts:
-                    span.set_attribute("summary", f"All {_max_attempts} attempts failed with HTTP errors")
-                    return []
-                continue
+        proxies_to_try = [None] + ([proxy] if proxy else [])
 
-            span.set_attribute("http_status", response.status_code)
-            if response.status_code != 200:
-                logger.warning(
-                    "Search returned HTTP %d for '%s' (attempt %d/%d)",
-                    response.status_code, query, attempt, _max_attempts,
-                )
-                span.add_event("search.bad_status", {
-                    "attempt": attempt,
-                    "status_code": response.status_code,
-                })
-                if attempt == _max_attempts:
-                    span.set_attribute("summary", f"Search failed: HTTP {response.status_code}")
-                    return []
-                continue
+        for current_proxy in proxies_to_try:
+            proxy_label = "proxy" if current_proxy else "direct"
+            for attempt in range(1, _max_attempts + 1):
+                try:
+                    async with AsyncSession(
+                        timeout=_REQUEST_TIMEOUT,
+                        headers=_REQUEST_HEADERS,
+                        impersonate="chrome",
+                        proxy=current_proxy,
+                        verify=current_proxy is None,
+                    ) as client:
+                        response = await client.get(url, allow_redirects=True)
+                except Exception as exc:
+                    logger.warning(
+                        "HTTP request failed (%s) for '%s' (attempt %d/%d)",
+                        proxy_label, query, attempt, _max_attempts,
+                    )
+                    span.add_event("search.http_error", {
+                        "attempt": attempt,
+                        "proxy": proxy_label,
+                        "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                    })
+                    if attempt == _max_attempts:
+                        break  # try next proxy
+                    continue
 
-            html = response.text
-            span.set_attribute("response_length", len(html))
+                span.set_attribute("http_status", response.status_code)
+                if response.status_code != 200:
+                    logger.warning(
+                        "Search returned HTTP %d (%s) for '%s' (attempt %d/%d)",
+                        response.status_code, proxy_label, query, attempt, _max_attempts,
+                    )
+                    span.add_event("search.bad_status", {
+                        "attempt": attempt,
+                        "proxy": proxy_label,
+                        "status_code": response.status_code,
+                    })
+                    if attempt == _max_attempts:
+                        break  # try next proxy
+                    continue
 
-            # Check for DuckDuckGo rate-limiting indicators
-            if "captcha" in html.lower() or "unusual traffic" in html.lower():
-                span.add_event("search.rate_limited", {"indicator": "captcha_or_traffic_warning"})
-                span.set_attribute("rate_limited", True)
+                html = response.text
+                span.set_attribute("response_length", len(html))
 
-            results = extract_search_results(html)
-            span.set_attribute("result_count", len(results))
-            if not results:
-                logger.warning("No results extracted from HTML for '%s'", query)
-                span.set_attribute("summary", f"HTTP 200 but 0 results parsed from {len(html)} chars HTML (possible rate-limit or empty page)")
-            else:
-                logger.info("Found %d search results for '%s'", len(results), query)
-                top_domains = [r.url.split("/")[2] if "/" in r.url else r.url for r in results[:5]]
-                span.set_attribute("summary", f"Found {len(results)} results. Top: {', '.join(top_domains)}")
-            return results
+                # Check for DuckDuckGo rate-limiting indicators
+                if "captcha" in html.lower() or "unusual traffic" in html.lower():
+                    span.add_event("search.rate_limited", {"indicator": "captcha_or_traffic_warning"})
+                    span.set_attribute("rate_limited", True)
 
-        span.set_attribute("summary", "All attempts exhausted with no results")
+                results = extract_search_results(html)
+                span.set_attribute("result_count", len(results))
+                if not results:
+                    logger.warning("No results extracted from HTML for '%s'", query)
+                    span.set_attribute("summary", f"HTTP 200 but 0 results parsed from {len(html)} chars HTML (possible rate-limit or empty page)")
+                else:
+                    logger.info("Found %d search results for '%s'", len(results), query)
+                    top_domains = [r.url.split("/")[2] if "/" in r.url else r.url for r in results[:5]]
+                    span.set_attribute("summary", f"Found {len(results)} results. Top: {', '.join(top_domains)}")
+                return results
+
+        span.set_attribute("summary", f"All attempts exhausted ({', '.join('proxy' if p else 'direct' for p in proxies_to_try)})")
         return []
 
 
@@ -413,185 +420,98 @@ async def search_products(
     return results
 
 
-async def search_products_via_browser(
-    browser: object,
+async def search_products_via_searxng(
     query: str,
     language: str = "en",
     market: str = "us",
     *,
     refined_query: str | None = None,
 ) -> list[SearchResult]:
-    """Search for products using a Playwright browser with proper locale.
+    """Search for products using the self-hosted SearXNG meta-search instance.
 
-    Uses the country-specific Google domain so that the search engine
-    returns local sellers with local-currency prices — the same results
-    the user would see in their own browser.
+    SearXNG aggregates results from Google, Bing, DuckDuckGo, and Brave,
+    avoiding CAPTCHA issues that plague direct Google browser searches.
 
-    Falls back to :func:`search_products` (HTTP-based DuckDuckGo) when the
-    browser search yields no results.
+    Falls back to :func:`search_products` (HTTP-based DuckDuckGo) when
+    SearXNG is unavailable or returns no results.
     """
-    from src.shared.browser import get_page  # avoid circular at module level
-
     search_text = refined_query or query
-    google_domain = get_google_domain(market)
     suffix = get_buy_online_suffix(language=language, market=market)
-    # Use gl/hl params to get geo-localized results without needing a
-    # proxy (many proxy providers block Google for non-KYC accounts).
+    full_query = f"{search_text} {suffix}"
     search_lang = get_market_language(market) or language
-    search_url = (
-        f"https://www.{google_domain}/search"
-        f"?q={quote_plus(f'{search_text} {suffix}')}"
-        f"&gl={market}"
-        f"&hl={search_lang}"
-    )
 
-    locale = f"{language}-{market.upper()}"
-    market_lang = get_market_language(market)
-    if market_lang and market_lang != language:
-        locale = f"{market_lang}-{market.upper()}"
+    searxng_base = settings.searxng_url.rstrip("/")
+    params = {
+        "q": full_query,
+        "format": "json",
+        "language": f"{search_lang}-{market.upper()}",
+        "safesearch": "0",
+    }
+    search_url = f"{searxng_base}/search?{_urlencode_params(params)}"
 
     span = trace.get_current_span()
-    span.set_attribute("browser_search_url", search_url)
-    span.set_attribute("browser_locale", locale)
-    span.set_attribute("browser_google_domain", google_domain)
-    logger.info("Browser search: '%s' on %s (locale=%s)", search_text, google_domain, locale)
+    span.set_attribute("searxng_search_url", search_url)
+    span.set_attribute("searxng_language", f"{search_lang}-{market.upper()}")
+    logger.info("SearXNG search: '%s' (lang=%s-%s)", full_query, search_lang, market.upper())
 
     try:
-        # Skip proxy for Google — gl/hl params handle geo-targeting, and
-        # many proxy providers block Google for non-KYC accounts.
-        async with get_page(browser, locale=locale, market=market, use_proxy=False) as page:
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=15000)
+        async with AsyncSession() as session:
+            resp = await session.get(
+                search_url,
+                headers=_REQUEST_HEADERS,
+                timeout=_REQUEST_TIMEOUT,
+            )
+            span.set_attribute("searxng_http_status", resp.status_code)
 
-            # Detect Google CAPTCHA/sorry redirect
-            current_url = page.url
-            if "/sorry/" in current_url:
-                logger.warning("Google CAPTCHA detected, skipping browser search")
-                span.set_attribute("browser_search_error", "true")
-                span.set_attribute("browser_error_detail", "Google CAPTCHA/rate-limit detected")
+            if resp.status_code != 200:
+                logger.warning("SearXNG returned HTTP %d", resp.status_code)
+                span.set_attribute("searxng_error", f"HTTP {resp.status_code}")
                 return await search_products(query, language, market, refined_query=refined_query)
 
-            # Accept Google consent if prompted
-            from src.shared.browser import dismiss_consent
-            google_domain_name = google_domain.replace("www.", "")
-            if await dismiss_consent(page, google_domain_name):
-                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            data = resp.json()
+            raw_results = data.get("results", [])
 
-            # Extract search result links
             results: list[SearchResult] = []
             seen_urls: set[str] = set()
 
-            anchors = page.locator("a[href]")
-            count = await anchors.count()
-
-            for i in range(min(count, 100)):
-                try:
-                    anchor = anchors.nth(i)
-                    href = await anchor.get_attribute("href") or ""
-                    if not href or href.startswith("#") or href.startswith("javascript:"):
-                        continue
-
-                    # Skip Google's own links
-                    from urllib.parse import urlparse
-                    parsed = urlparse(href)
-                    host = parsed.hostname or ""
-                    if any(g in host for g in ("google.", "gstatic.", "googleapis.", "youtube.")):
-                        continue
-                    if not parsed.scheme or parsed.scheme not in ("http", "https"):
-                        continue
-
-                    # Resolve Google redirect URLs (/url?q=...)
-                    if "/url?" in href and "q=" in href:
-                        from urllib.parse import parse_qs
-                        qs = parse_qs(parsed.query)
-                        actual = qs.get("q", [""])[0] or qs.get("url", [""])[0]
-                        if actual:
-                            href = actual
-                        else:
-                            continue
-
-                    if href in seen_urls:
-                        continue
-                    seen_urls.add(href)
-
-                    title = (await anchor.inner_text()).strip()[:200]
-                    if not title:
-                        continue
-
-                    results.append(SearchResult(
-                        url=href,
-                        title=title,
-                        snippet="",
-                    ))
-                except Exception:
+            for item in raw_results:
+                url = item.get("url", "")
+                if not url or url in seen_urls:
                     continue
+                # Skip search engine domains
+                from urllib.parse import urlparse
+                host = urlparse(url).hostname or ""
+                if any(g in host for g in ("google.", "bing.", "duckduckgo.", "brave.", "searx")):
+                    continue
+                seen_urls.add(url)
+                results.append(SearchResult(
+                    url=url,
+                    title=item.get("title", "")[:200],
+                    snippet=item.get("content", "")[:300],
+                ))
 
-            # Extract Google Shopping results (product cards with prices)
-            shopping_count = 0
-            try:
-                shopping_cards = page.locator("[data-docid], .sh-dgr__content, .commercial-unit-desktop-top a[href*='/shopping/']")
-                card_count = await shopping_cards.count()
-                for i in range(min(card_count, 20)):
-                    try:
-                        card = shopping_cards.nth(i)
-                        card_anchor = card.locator("a[href]").first
-                        if await card_anchor.count() == 0:
-                            # The card itself might be the anchor
-                            card_anchor = card if await card.get_attribute("href") else None
-                            if not card_anchor:
-                                continue
-
-                        href = await card_anchor.get_attribute("href") or ""
-                        if not href or href in seen_urls:
-                            continue
-
-                        # Resolve Google redirect URLs
-                        if "/url?" in href and "q=" in href:
-                            from urllib.parse import parse_qs
-                            parsed_href = urlparse(href)
-                            qs = parse_qs(parsed_href.query)
-                            actual = qs.get("q", [""])[0] or qs.get("url", [""])[0]
-                            if actual:
-                                href = actual
-
-                        parsed_href = urlparse(href)
-                        host = parsed_href.hostname or ""
-                        if any(g in host for g in ("google.", "gstatic.", "googleapis.")):
-                            continue
-                        if not parsed_href.scheme or parsed_href.scheme not in ("http", "https"):
-                            continue
-
-                        seen_urls.add(href)
-                        title = (await card.inner_text()).strip()[:200]
-                        results.append(SearchResult(
-                            url=href,
-                            title=f"[Shopping] {title}" if title else "[Shopping result]",
-                            snippet="",
-                        ))
-                        shopping_count += 1
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            span.set_attribute("browser_result_count", len(results))
-            span.set_attribute("shopping_result_count", shopping_count)
-            logger.info("Browser search found %d results (%d shopping) for '%s'",
-                       len(results), shopping_count, query)
+            span.set_attribute("searxng_result_count", len(results))
+            span.set_attribute("searxng_engines", str(data.get("number_of_results", "")))
+            logger.info("SearXNG found %d results for '%s'", len(results), query)
 
             if results:
                 span.set_attribute("summary",
-                    f"Browser search on {google_domain} found {len(results)} results ({shopping_count} shopping)")
+                    f"SearXNG search found {len(results)} results for '{search_text}'")
                 return results
 
     except Exception as exc:
-        logger.warning("Browser search failed for '%s'", query, exc_info=True)
-        span.set_attribute("browser_search_error", "true")
-        span.set_attribute("browser_error_detail", f"{type(exc).__name__}: {str(exc)[:200]}")
+        logger.warning("SearXNG search failed for '%s'", query, exc_info=True)
+        span.set_attribute("searxng_error", f"{type(exc).__name__}: {str(exc)[:200]}")
 
-    # Fallback to HTTP-based search
-    span.set_attribute("summary", f"Browser search failed/empty, falling back to HTTP search")
+    # Fallback to HTTP-based DuckDuckGo search
+    span.set_attribute("summary", "SearXNG failed/empty, falling back to DDG HTTP search")
     logger.info("Falling back to HTTP search for '%s'", query)
     return await search_products(query, language, market, refined_query=refined_query)
+
+
+def _urlencode_params(params: dict[str, str]) -> str:
+    """URL-encode query parameters."""
+    return "&".join(f"{k}={quote_plus(v)}" for k, v in params.items())
 
 
 async def get_aggregator_urls(

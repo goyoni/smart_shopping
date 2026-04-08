@@ -30,12 +30,46 @@ async def _attempt_http(
     cached: ScrapingStrategy | None,
     market: str = "us",
 ) -> ExtractionResult:
-    """Try to fetch and extract products via HTTP (no browser)."""
+    """Try to fetch and extract products via HTTP (no browser).
+
+    Tries direct access first.  If the site blocks us (403, Cloudflare,
+    WAF), retries through the residential proxy when one is configured.
+    """
+    headers = get_http_headers(market)
+
+    # 1. Try direct (no proxy)
+    result = await _do_http_attempt(
+        url, product_query, domain, page_type,
+        access_method, headers, proxy=None,
+    )
+    if result.success or not result.is_blocked:
+        return result
+
+    # 2. Blocked — retry with proxy if available
+    proxy = get_proxy_for_market(market)
+    if not proxy:
+        return result
+
+    _pipeline_event(domain, access_method, "blocked without proxy, retrying with proxy")
+    return await _do_http_attempt(
+        url, product_query, domain, page_type,
+        access_method, headers, proxy=proxy,
+    )
+
+
+async def _do_http_attempt(
+    url: str,
+    product_query: str,
+    domain: str,
+    page_type: str,
+    access_method: str,
+    headers: dict,
+    proxy: str | None,
+) -> ExtractionResult:
+    """Single HTTP fetch + extract attempt (with or without proxy)."""
     html: str | None = None
     status_code: int | None = None
     error: Exception | None = None
-    headers = get_http_headers(market)
-    proxy = get_proxy_for_market(market)
 
     if access_method == "httpx":
         try:
@@ -69,13 +103,15 @@ async def _attempt_http(
         except Exception as exc:
             error = exc
 
+    proxy_label = "proxy" if proxy else "direct"
+
     # Classify failure
     if html is None or len(html) < 1000:
         failure = classify_http_failure(status_code, html or "", error)
         err_name = type(error).__name__ if error else None
         _pipeline_event(
             domain, access_method,
-            f"HTTP failed: status={status_code} body={len(html or '')} err={err_name} → {failure.value if failure else 'unknown'}",
+            f"HTTP failed ({proxy_label}): status={status_code} body={len(html or '')} err={err_name} → {failure.value if failure else 'unknown'}",
             status_code=status_code or 0,
         )
         return ExtractionResult(
@@ -87,7 +123,7 @@ async def _attempt_http(
         )
 
     # Run all extraction methods on the HTML
-    _pipeline_event(domain, access_method, f"HTTP 200, body={len(html)} chars, extracting...", body_length=len(html))
+    _pipeline_event(domain, access_method, f"HTTP 200 ({proxy_label}), body={len(html)} chars, extracting...", body_length=len(html))
     soup = BeautifulSoup(html, "lxml")
     extraction_results = extract_all_from_soup(soup, url, domain, product_query)
 
@@ -155,9 +191,28 @@ async def _attempt_http_listing_then_product(
 
 
 async def _fetch_html(url: str, access_method: str, *, market: str = "us") -> str | None:
-    """Fetch raw HTML via httpx or curl_cffi."""
+    """Fetch raw HTML via httpx or curl_cffi.
+
+    Tries direct first, falls back to proxy on non-200 responses.
+    """
     headers = get_http_headers(market)
+
+    # Try direct first
+    html = await _do_fetch_html(url, access_method, headers, proxy=None)
+    if html:
+        return html
+
+    # Direct failed — try proxy if available
     proxy = get_proxy_for_market(market)
+    if proxy:
+        return await _do_fetch_html(url, access_method, headers, proxy=proxy)
+    return None
+
+
+async def _do_fetch_html(
+    url: str, access_method: str, headers: dict, proxy: str | None,
+) -> str | None:
+    """Single HTML fetch attempt (with or without proxy)."""
     if access_method == "httpx":
         try:
             async with httpx.AsyncClient(

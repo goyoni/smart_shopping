@@ -38,6 +38,19 @@ class ExtractionResult:
     def success(self) -> bool:
         return bool(self.products) and self.failure_type is None
 
+    @property
+    def is_blocked(self) -> bool:
+        """True when the failure suggests a proxy might help."""
+        return self.failure_type in _PROXY_WORTHY_FAILURES
+
+
+_PROXY_WORTHY_FAILURES = frozenset({
+    FailureType.HTTP_BLOCKED,
+    FailureType.CLOUDFLARE_JS,
+    FailureType.CLOUDFLARE_CAPTCHA,
+    FailureType.WAF_BLOCKED,
+})
+
 
 def classify_http_failure(
     status_code: int | None,

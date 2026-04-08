@@ -111,7 +111,7 @@ async def get_browser() -> AsyncIterator[Browser]:
 @asynccontextmanager
 async def get_page(
     browser: Browser, locale: str = "en-US", market: str = "il",
-    *, use_proxy: bool = True,
+    *, use_proxy: bool = False,
 ) -> AsyncIterator[Page]:
     """Create a new page with realistic viewport settings.
 

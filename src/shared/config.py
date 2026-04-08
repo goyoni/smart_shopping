@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     scraper_llm_model: str = ""  # Override for scraper strategy discovery; falls back to llm_model
     proxy_url: str = ""  # Residential proxy URL template with {country} placeholder, e.g. http://user-country-{country}:pass@proxy.example.com:22225
+    searxng_url: str = "http://localhost:8888"  # SearXNG meta-search instance URL
 
     model_config = {"env_file": "config/.env.local", "extra": "ignore"}
 

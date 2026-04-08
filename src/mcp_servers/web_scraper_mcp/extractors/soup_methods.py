@@ -64,15 +64,9 @@ def extract_all_from_soup(
     if product:
         results.append(("og_meta", [product]))
 
-    # 6. CSS listing cards
-    listing_products = _extract_listing_cards_from_soup(soup, url, domain)
-    _extraction_event("css_listing", f"{len(listing_products)} products" if listing_products else "0 products (no card containers with >=2 elements)", product_count=len(listing_products))
-    if listing_products:
-        results.append(("css_listing", listing_products))
-
     methods_with_results = [(m, len(p)) for m, p in results]
     _extraction_event("soup_summary",
-        f"Ran 6 methods on {domain}: {methods_with_results if methods_with_results else 'all returned 0'}",
+        f"Ran 5 methods on {domain}: {methods_with_results if methods_with_results else 'all returned 0'}",
         winning_methods=str(methods_with_results),
     )
 
@@ -330,66 +324,3 @@ def _extract_og_product_from_soup(
     )
 
 
-def _extract_listing_cards_from_soup(
-    soup: BeautifulSoup, page_url: str, domain: str,
-) -> list[ProductResult]:
-    products: list[ProductResult] = []
-    currency = get_default_currency_for_domain(domain)
-
-    card_selectors = [
-        "li.card",
-        "[class*='product-card']",
-        "[class*='ProductCard']",
-        "[class*='product-item']",
-        "div[data-product-id]",
-        "article[class*='product']",
-    ]
-
-    cards = []
-    for sel in card_selectors:
-        cards = soup.select(sel)
-        if len(cards) >= 2:
-            break
-
-    if len(cards) < 2:
-        return []
-
-    for card in cards[:_MAX_PRODUCTS_PER_SITE]:
-        name = ""
-        product_url = page_url
-        link = card.select_one("a[href]")
-        if link:
-            name = link.get_text(strip=True)[:200]
-            href = link.get("href", "")
-            if href:
-                product_url = urljoin(page_url, href)
-
-        if not name or len(name) < 3:
-            heading = card.select_one("h2, h3, h4, [class*='name'], [class*='title']")
-            if heading:
-                name = heading.get_text(strip=True)[:200]
-
-        if not name or len(name) < 3:
-            continue
-
-        price = None
-        price_el = card.select_one("[class*='price'], [data-price]")
-        if price_el:
-            price_text = price_el.get("data-price") or price_el.get_text(strip=True)
-            price = _parse_price(price_text or "")
-
-        img = card.select_one("img[src], img[data-src]")
-        image_url = None
-        if img:
-            image_url = img.get("src") or img.get("data-src")
-            if image_url:
-                image_url = urljoin(page_url, image_url)
-
-        products.append(ProductResult(
-            name=name,
-            model_id=_extract_model_from_text(name),
-            image_url=image_url,
-            sellers=[Seller(name=domain, price=price, currency=currency, url=product_url)],
-        ))
-
-    return products
