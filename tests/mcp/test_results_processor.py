@@ -60,7 +60,7 @@ class TestValidateResults:
     def test_missing_price(self):
         products = [_product("Product A", price=None)]
         validated = validate_results(products)
-        assert validated[0]["valid"] is True  # Still valid (has name)
+        assert validated[0]["valid"] is False  # Requires at least one priced seller
         assert "no_price" in validated[0]["warnings"]
 
     def test_missing_name(self):
