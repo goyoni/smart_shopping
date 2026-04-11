@@ -117,7 +117,7 @@ async def _do_playwright_attempt(
 
         # --- Step 1: Navigate to the initial URL ---
         _pipeline_event(domain, "playwright", f"navigating to {url[:120]}")
-        nav_error = await _playwright_navigate(page, url, domain, page_type)
+        nav_error = await _playwright_navigate(page, url, domain, page_type, use_proxy=use_proxy)
         if nav_error:
             return nav_error
 
@@ -157,7 +157,7 @@ async def _do_playwright_attempt(
                 if product_url:
                     _pipeline_event(domain, "playwright", f"navigating to product: {product_url[:120]}")
                     captured_responses.clear()
-                    nav_error = await _playwright_navigate(page, product_url, domain, "product")
+                    nav_error = await _playwright_navigate(page, product_url, domain, "product", use_proxy=use_proxy)
                     if nav_error:
                         _pipeline_event(domain, "playwright",
                             "product page navigation failed, will discover listing strategy")
@@ -181,7 +181,7 @@ async def _do_playwright_attempt(
                     "no products from product page, discovering listing strategy")
                 # Navigate back to the listing page if we left it
                 if page.url != url:
-                    back_error = await _playwright_navigate(page, url, domain, page_type)
+                    back_error = await _playwright_navigate(page, url, domain, page_type, use_proxy=use_proxy)
                     if back_error:
                         _pipeline_event(domain, "playwright", "failed to navigate back to listing")
                     else:
@@ -245,10 +245,13 @@ async def _playwright_navigate(
     url: str,
     domain: str,
     page_type: str,
+    *,
+    use_proxy: bool = False,
 ) -> ExtractionResult | None:
     """Navigate to a URL, handle Cloudflare challenges. Returns error or None."""
+    timeout = 40000 if use_proxy else 20000
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
     except Exception as exc:
         _pipeline_event(domain, "playwright", f"navigation failed: {str(exc)[:200]}")
         return ExtractionResult(

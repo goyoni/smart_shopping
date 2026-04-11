@@ -122,6 +122,18 @@ def _merge_comparison_sellers(
             f"Skip merge: names are neither all-same nor all-unique ({len(unique_names)} unique out of {len(names)})")
         return products
 
+    # On comparison pages, "names" are short seller/store names (median ~10
+    # chars).  On search result pages, names are long product descriptions
+    # (median ~47 chars).  Use median name length to distinguish.
+    _MAX_SELLER_NAME_LENGTH = 25
+    if all_unique and not has_query_match:
+        median_len = sorted(len(n) for n in names)[len(names) // 2]
+        if median_len > _MAX_SELLER_NAME_LENGTH:
+            _pipeline_event(domain, "merge_sellers",
+                f"Skip merge: median name length {median_len} > {_MAX_SELLER_NAME_LENGTH} "
+                f"indicates product descriptions, not seller names")
+            return products
+
     sellers: list[Seller] = []
     for p in products:
         seller = p.sellers[0]

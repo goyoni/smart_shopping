@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import lru_cache
 from urllib.parse import urlparse
 
 from sqlalchemy import select
@@ -19,7 +20,9 @@ from sqlalchemy import select
 from opentelemetry import trace as otel_trace
 
 from src.shared.logging import get_logger
-from src.shared.market_config import get_market_tld, get_marketplace_domain_map
+from src.shared.market_config import (
+    get_all_market_codes, get_market_tld, get_marketplace_domain_map,
+)
 
 logger = get_logger(__name__)
 
@@ -30,6 +33,8 @@ _NON_ECOMMERCE_DOMAINS: set[str] = {
     "github.com", "stackoverflow.com", "bbc.com", "cnn.com",
     # Manual / documentation sites
     "manualslib.com", "manuals.co.uk", "manua.ls",
+    # Q&A / knowledge sites
+    "zhihu.com",
 }
 
 _ECOMMERCE_PATH_PATTERNS: list[str] = [
@@ -211,6 +216,31 @@ def _is_manufacturer_domain(domain: str) -> bool:
     return False
 
 
+@lru_cache(maxsize=1)
+def _foreign_market_tlds() -> dict[str, str]:
+    """Build mapping of country TLD -> market code for all configured markets.
+
+    E.g. {".co.il": "il", ".de": "de", ".fr": "fr", ...}
+    """
+    mapping: dict[str, str] = {}
+    for code in get_all_market_codes():
+        tld = get_market_tld(code)
+        if tld:
+            mapping[tld] = code
+    return mapping
+
+
+def _is_foreign_market_tld(domain: str, market: str, market_tld: str | None) -> bool:
+    """Check if domain has a TLD belonging to a different configured market."""
+    # Don't penalize if it matches our own market TLD
+    if market_tld and domain.endswith(market_tld):
+        return False
+    for tld, tld_market in _foreign_market_tlds().items():
+        if tld_market != market and domain.endswith(tld):
+            return True
+    return False
+
+
 async def identify_ecommerce_sites(
     urls_data: list[dict[str, str]],
     market: str | None = None,
@@ -244,6 +274,10 @@ async def identify_ecommerce_sites(
                 if domain_market and domain_market != market:
                     signal.confidence *= 0.1
                     signal.signals.append(f"market_mismatch:{signal.domain}!={market}")
+                # Penalize domains whose TLD belongs to a different market
+                elif _is_foreign_market_tld(signal.domain, market, market_tld):
+                    signal.confidence *= 0.15
+                    signal.signals.append("foreign_market_tld")
                 # Boost domains matching the target market TLD
                 elif market_tld and signal.domain.endswith(market_tld):
                     signal.confidence = min(signal.confidence + 0.5, 1.5)

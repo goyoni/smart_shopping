@@ -6,6 +6,7 @@ Re-exports all public symbols so existing imports continue to work:
 
 from .api_extract import extract_from_api_responses
 from .css_strategy_extract import extract_with_strategy
+from .llm_soup_extract import extract_products_via_llm_soup
 from .page_methods import extract_all_from_page
 from .soup_methods import (
     _extract_from_data_attrs,
@@ -21,6 +22,7 @@ __all__ = [
     "extract_all_from_soup",
     "extract_all_from_page",
     "extract_from_api_responses",
+    "extract_products_via_llm_soup",
     "extract_with_strategy",
     "validate_results",
     # Exported for tests

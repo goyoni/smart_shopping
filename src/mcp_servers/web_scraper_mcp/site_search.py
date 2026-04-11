@@ -79,6 +79,12 @@ async def get_cached_site_search(domain: str) -> SiteSearchConfig | None:
 
 async def save_site_search(domain: str, config: SiteSearchConfig) -> None:
     """Save or update a site search strategy."""
+    # Normalize: if domain has no www. prefix but the discovered template
+    # does (due to redirect), strip it so the template matches the domain.
+    if not domain.startswith("www.") and config.search_url_template:
+        config.search_url_template = config.search_url_template.replace(
+            f"://www.{domain}", f"://{domain}"
+        )
     async with async_session() as session:
         stmt = select(SiteSearchStrategy).where(
             SiteSearchStrategy.domain == domain,
@@ -561,6 +567,16 @@ def _validate_url_template(template: str, domain: str) -> bool:
         if indicator in path:
             return False
 
+    # Reject contact/feedback/support pages misidentified as search
+    _NON_SEARCH_INDICATORS = (
+        "/contact", "/feedback", "/support", "/helpdesk",
+        "service=contact", "service=feedback",
+    )
+    template_lower = template.lower()
+    for indicator in _NON_SEARCH_INDICATORS:
+        if indicator in template_lower:
+            return False
+
     # Reject paths with numeric IDs (likely product pages)
     # e.g. /web/item/322977 or /p/56462228
     if re.search(r"/\d{4,}", path):
@@ -595,6 +611,9 @@ def _explain_template_rejection(template: str, domain: str) -> str:
     for ind in ("/item/", "/product/", "/prod/", "/p/", "/mob/item/", "/model."):
         if ind in template.lower():
             return f"path contains product indicator '{ind}'"
+    for ind in ("/contact", "/feedback", "/support", "/helpdesk", "service=contact", "service=feedback"):
+        if ind in template.lower():
+            return f"non-search page indicator '{ind}'"
     return "failed validation"
 
 
@@ -689,6 +708,18 @@ async def search_within_site(
                 page_type_hint="search",
             )
 
+            # Filter to products matching the queried model, with a
+            # price, and tag them with the queried model_id.
+            mid_lower = model_id.lower()
+            products = [
+                p for p in products
+                if (mid_lower in p.name.lower()
+                    or (p.model_id and mid_lower in p.model_id.lower()))
+                and any(s.price is not None for s in p.sellers)
+            ]
+            for p in products:
+                p.product_type = model_id
+
             span.set_attribute("product_count", len(products))
             span.set_attribute("summary",
                 f"URL template search on {domain} for '{model_id}': {len(products)} products")
@@ -745,6 +776,18 @@ async def search_within_site(
                 locale=locale, market=market,
                 page_type_hint="search",
             )
+
+            # Filter to products matching the queried model, with a
+            # price, and tag them with the queried model_id.
+            mid_lower = model_id.lower()
+            products = [
+                p for p in products
+                if (mid_lower in p.name.lower()
+                    or (p.model_id and mid_lower in p.model_id.lower()))
+                and any(s.price is not None for s in p.sellers)
+            ]
+            for p in products:
+                p.product_type = model_id
 
             span.set_attribute("product_count", len(products))
             span.set_attribute("summary",

@@ -102,6 +102,7 @@ async def scrape_page(
     pipeline = _build_pipeline(cached)
 
     last_failure: FailureType | None = None
+    skip_http = False  # Set when HTTP confirms JS SPA — curl_cffi won't help either
 
     order = [m for (m,) in pipeline]
     cached_method = cached.discovery_method if cached else None
@@ -114,6 +115,10 @@ async def scrape_page(
     is_listing = page_type in ("search", "catalog")
 
     for (access_method,) in pipeline:
+        if access_method in ("httpx", "curl_cffi") and skip_http:
+            _pipeline_event(domain, access_method, "skipped (JS SPA confirmed by prior HTTP method)")
+            continue
+
         _pipeline_event(domain, access_method, "attempting")
 
         if access_method in ("httpx", "curl_cffi"):
@@ -152,6 +157,11 @@ async def scrape_page(
             domain, access_method,
             f"failed: {last_failure.value if last_failure else 'unknown'} ({result.failure_detail})",
         )
+
+        # If HTTP got 200 but found no products, it's a JS SPA —
+        # skip remaining HTTP methods and jump to Playwright.
+        if last_failure == FailureType.JS_SPA_NO_DATA and access_method in ("httpx", "curl_cffi"):
+            skip_http = True
 
         if last_failure == FailureType.CLOUDFLARE_CAPTCHA:
             logger.warning("Cloudflare CAPTCHA on %s — cannot bypass, aborting", domain)

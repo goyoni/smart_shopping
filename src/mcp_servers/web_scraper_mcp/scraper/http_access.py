@@ -15,6 +15,7 @@ from src.mcp_servers.web_scraper_mcp.diagnostics import (
     classify_http_failure,
 )
 from src.mcp_servers.web_scraper_mcp.extractors import extract_all_from_soup
+from src.mcp_servers.web_scraper_mcp.extractors.llm_soup_extract import extract_products_via_llm_soup
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.proxy import get_proxy_for_market
 
@@ -138,7 +139,21 @@ async def _do_http_attempt(
             page_type=page_type,
         )
 
-    # HTML was fetched but no products extracted — likely a JS SPA
+    # HTML was fetched but no structured products — try LLM as last resort.
+    # Only on search/listing pages with enough content to be worth analyzing.
+    if page_type in ("search", "catalog") and len(html) >= 10_000 and product_query:
+        _pipeline_event(domain, access_method, "0 products from structured extractors, trying LLM on HTML")
+        llm_products = await extract_products_via_llm_soup(soup, url, domain, product_query)
+        if llm_products:
+            _pipeline_event(domain, access_method, f"LLM extracted {len(llm_products)} products from HTML", product_count=len(llm_products))
+            return ExtractionResult(
+                products=llm_products,
+                access_method=access_method,
+                extraction_method="llm_soup",
+                domain=domain,
+                page_type=page_type,
+            )
+
     _pipeline_event(domain, access_method, "200 OK but 0 products in static HTML (JS SPA?)")
     return ExtractionResult(
         access_method=access_method,
