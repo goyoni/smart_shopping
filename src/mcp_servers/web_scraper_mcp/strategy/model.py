@@ -43,6 +43,10 @@ class ScrapingStrategy:
     price_attr: str = ""
     # Navigation: CSS selector for product links on listing/search pages.
     product_link_selector: str = ""
+    # Pagination: how to navigate to next pages on listing/search pages.
+    next_page_selector: str = ""   # CSS selector for "next page" link/button
+    pagination_type: str = ""      # "link" | "load_more" | "url_param" | ""
+    pagination_param: str = ""     # URL parameter name (e.g. "page", "p", "offset")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))

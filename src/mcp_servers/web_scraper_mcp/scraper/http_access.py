@@ -20,7 +20,8 @@ from src.mcp_servers.web_scraper_mcp.extractors.llm_soup_extract import extract_
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.proxy import get_proxy_for_market
 
-from .helpers import _HTTP_HEADERS, _HTTP_TIMEOUT, _pipeline_event, get_http_headers
+from .helpers import _HTTP_HEADERS, _HTTP_TIMEOUT, _MAX_PAGES, _pipeline_event, get_http_headers
+from .pagination import build_page_url, deduplicate_products, detect_url_pagination
 
 
 async def _attempt_http(
@@ -31,11 +32,14 @@ async def _attempt_http(
     access_method: str,
     cached: ScrapingStrategy | None,
     market: str = "us",
+    max_pages: int = _MAX_PAGES,
 ) -> ExtractionResult:
     """Try to fetch and extract products via HTTP (no browser).
 
     Tries direct access first.  If the site blocks us (403, Cloudflare,
     WAF), retries through the residential proxy when one is configured.
+    After getting first-page results on listing pages, follows URL-param
+    pagination for up to max_pages additional pages.
     """
     headers = get_http_headers(market)
 
@@ -45,6 +49,12 @@ async def _attempt_http(
         access_method, headers, proxy=None,
     )
     if result.success or not result.is_blocked:
+        # Pagination for listing pages with URL-param pagination
+        if result.success and page_type in ("search", "catalog") and max_pages > 0:
+            result = await _paginate_http(
+                result, url, product_query, domain, page_type,
+                access_method, headers, proxy=None, max_pages=max_pages,
+            )
         return result
 
     # 2. Blocked — retry with proxy if available
@@ -53,10 +63,16 @@ async def _attempt_http(
         return result
 
     _pipeline_event(domain, access_method, "blocked without proxy, retrying with proxy")
-    return await _do_http_attempt(
+    result = await _do_http_attempt(
         url, product_query, domain, page_type,
         access_method, headers, proxy=proxy,
     )
+    if result.success and page_type in ("search", "catalog") and max_pages > 0:
+        result = await _paginate_http(
+            result, url, product_query, domain, page_type,
+            access_method, headers, proxy=proxy, max_pages=max_pages,
+        )
+    return result
 
 
 async def _do_http_attempt(
@@ -187,6 +203,7 @@ async def _attempt_http_listing_then_product(
     cached: ScrapingStrategy | None,
     cached_product: ScrapingStrategy | None,
     market: str = "us",
+    max_pages: int = _MAX_PAGES,
 ) -> ExtractionResult:
     """Two-step HTTP: fetch listing page, find product link, fetch product page."""
     # Step 1: Fetch listing HTML
@@ -321,3 +338,69 @@ def _find_product_link_in_html(
     if best_score >= 2:
         return best_url
     return None
+
+
+async def _paginate_http(
+    first_result: ExtractionResult,
+    url: str,
+    product_query: str,
+    domain: str,
+    page_type: str,
+    access_method: str,
+    headers: dict,
+    proxy: str | None,
+    max_pages: int,
+) -> ExtractionResult:
+    """Follow URL-parameter pagination for HTTP-based extraction.
+
+    Only works when the URL has a detectable page/offset parameter.
+    """
+    pagination = detect_url_pagination(url)
+    if not pagination:
+        return first_result
+
+    param_name, current_page = pagination
+    all_products = list(first_result.products)
+
+    _pipeline_event(domain, f"{access_method}:pagination",
+        f"detected URL param '{param_name}={current_page}', fetching up to {max_pages} more pages")
+
+    for page_num in range(current_page + 1, current_page + max_pages + 1):
+        next_url = build_page_url(url, param_name, page_num)
+        html = await _do_fetch_html(next_url, access_method, headers, proxy=proxy)
+        if not html or len(html) < 1000:
+            _pipeline_event(domain, f"{access_method}:pagination",
+                f"page {page_num}: fetch failed or too short, stopping")
+            break
+
+        block_type = looks_like_block_page(html)
+        if block_type:
+            _pipeline_event(domain, f"{access_method}:pagination",
+                f"page {page_num}: block detected, stopping")
+            break
+
+        soup = BeautifulSoup(html, "lxml")
+        extraction_results = extract_all_from_soup(soup, next_url, domain, product_query)
+        if not extraction_results:
+            _pipeline_event(domain, f"{access_method}:pagination",
+                f"page {page_num}: 0 products, stopping")
+            break
+
+        _, products = extraction_results[0]
+        all_products.extend(products)
+        _pipeline_event(domain, f"{access_method}:pagination",
+            f"page {page_num}: {len(products)} products (total: {len(all_products)})",
+            product_count=len(products))
+
+    result_products = deduplicate_products(all_products)
+    if len(result_products) < len(all_products):
+        _pipeline_event(domain, f"{access_method}:pagination",
+            f"deduplicated {len(all_products)} -> {len(result_products)} products")
+
+    return ExtractionResult(
+        products=result_products,
+        access_method=first_result.access_method,
+        extraction_method=first_result.extraction_method,
+        domain=first_result.domain,
+        page_type=first_result.page_type,
+    )

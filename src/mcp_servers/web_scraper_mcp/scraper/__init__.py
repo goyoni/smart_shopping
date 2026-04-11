@@ -11,6 +11,13 @@ from .helpers import (
     extract_specs_from_text,
     parse_price,
 )
+from .pagination import (
+    PaginationInfo,
+    build_next_page_url,
+    build_page_url,
+    deduplicate_products,
+    detect_url_pagination,
+)
 from .pipeline import scrape_page
 from .post_process import _merge_comparison_sellers
 
@@ -23,4 +30,10 @@ __all__ = [
     "_is_safe_url",
     "_find_next_page_url",
     "_merge_comparison_sellers",
+    # Pagination
+    "PaginationInfo",
+    "build_next_page_url",
+    "build_page_url",
+    "deduplicate_products",
+    "detect_url_pagination",
 ]

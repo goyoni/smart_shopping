@@ -17,7 +17,7 @@ from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.logging import get_logger
 from src.shared.models import ProductResult
 
-from .helpers import _detect_page_type, _is_safe_url, _pipeline_event, extract_domain
+from .helpers import _MAX_PAGES, _detect_page_type, _is_safe_url, _pipeline_event, extract_domain
 from .http_access import _attempt_http, _attempt_http_listing_then_product
 from .playwright_access import _attempt_playwright
 from .post_process import _cache_success, _post_process
@@ -52,6 +52,7 @@ async def scrape_page(
     market: str = "us",
     criteria: dict[str, dict] | None = None,
     page_type_hint: str = "",
+    max_pages: int = _MAX_PAGES,
 ) -> list[ProductResult]:
     """Scrape a product page using an adaptive pipeline.
 
@@ -126,7 +127,7 @@ async def scrape_page(
                 result = await _attempt_http_listing_then_product(
                     url, product_query, domain, page_type,
                     access_method, cached, cached_product,
-                    market=market,
+                    market=market, max_pages=max_pages,
                 )
             else:
                 result = await _attempt_http(
@@ -139,6 +140,7 @@ async def scrape_page(
                 browser, url, product_query, domain, page_type,
                 locale, criteria, cached, cached_product,
                 market=market, cached_listing=cached_listing,
+                max_pages=max_pages,
             )
 
         if result.success:

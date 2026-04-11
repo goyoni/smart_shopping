@@ -31,6 +31,7 @@ from src.shared.browser import get_page
 from src.mcp_servers.web_scraper_mcp.site_search import discover_site_search
 
 from .helpers import _IGNORE_DOMAINS, _pipeline_event
+from .pagination import paginate_playwright
 
 
 async def _attempt_playwright(
@@ -45,6 +46,7 @@ async def _attempt_playwright(
     cached_product: ScrapingStrategy | None = None,
     market: str = "us",
     cached_listing: ScrapingStrategy | None = None,
+    max_pages: int = 3,
 ) -> ExtractionResult:
     """Fetch page via Playwright, navigate to product if needed, extract.
 
@@ -54,7 +56,7 @@ async def _attempt_playwright(
     result = await _do_playwright_attempt(
         browser, url, product_query, domain, page_type,
         locale, criteria, cached, cached_product, market,
-        cached_listing, use_proxy=False,
+        cached_listing, use_proxy=False, max_pages=max_pages,
     )
     if result.success or not result.is_blocked:
         return result
@@ -68,7 +70,7 @@ async def _attempt_playwright(
     return await _do_playwright_attempt(
         browser, url, product_query, domain, page_type,
         locale, criteria, cached, cached_product, market,
-        cached_listing, use_proxy=True,
+        cached_listing, use_proxy=True, max_pages=max_pages,
     )
 
 
@@ -85,6 +87,7 @@ async def _do_playwright_attempt(
     market: str,
     cached_listing: ScrapingStrategy | None,
     use_proxy: bool,
+    max_pages: int = 3,
 ) -> ExtractionResult:
     """Single Playwright attempt (with or without proxy)."""
     async with get_page(browser, locale=locale, market=market, use_proxy=use_proxy) as page:
@@ -209,6 +212,30 @@ async def _do_playwright_attempt(
             await discover_site_search(page, domain)
         except Exception:
             pass  # Non-critical
+
+        # Pagination: if we found products on a listing page, try additional pages
+        if products and is_listing and max_pages > 0:
+            async def _extract_listing(pg, pg_url):
+                if cached_listing and cached_listing.product_container:
+                    prods = await extract_with_strategy(pg, cached_listing, pg_url, criteria=criteria)
+                    if prods:
+                        return prods
+                results = await extract_all_from_page(
+                    pg, pg_url, domain, product_query,
+                    [], criteria,
+                )
+                if results:
+                    _, prods = max(results, key=lambda pair: len(pair[1]))
+                    return prods
+                return []
+
+            try:
+                products = await paginate_playwright(
+                    page, domain, url, products,
+                    _extract_listing, max_pages=max_pages,
+                )
+            except Exception as exc:
+                _pipeline_event(domain, "pagination", f"pagination failed: {exc}")
 
         if products:
             _pipeline_event(domain, "playwright",

@@ -35,6 +35,11 @@ async def list_tools() -> list[Tool]:
                         "description": "Two-letter market code for geo-proxy routing (e.g. il, us, gr)",
                         "default": "us",
                     },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Maximum additional pages to follow via pagination (0 to disable)",
+                        "default": 3,
+                    },
                 },
                 "required": ["url"],
             },
@@ -104,8 +109,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         url = arguments["url"]
         product_query = arguments.get("product_query", "")
         market = arguments.get("market", "us")
+        max_pages = arguments.get("max_pages", 3)
         async with get_browser() as browser:
-            products = await scrape_page(browser, url, product_query, market=market)
+            products = await scrape_page(browser, url, product_query, market=market, max_pages=max_pages)
         products_data = [p.model_dump() for p in products]
         return [TextContent(type="text", text=json.dumps({"products": products_data, "status": "ok"}))]
 
