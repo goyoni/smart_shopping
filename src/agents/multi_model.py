@@ -46,6 +46,16 @@ from .query_utils import AgentState, StatusCallback, _build_locale, _MAX_SITES_T
 logger = get_logger(__name__)
 _tracer = get_tracer(__name__)
 
+_SITE_SEARCH_SEM: asyncio.Semaphore | None = None
+
+
+def _get_site_search_sem() -> asyncio.Semaphore:
+    """Lazy-init semaphore to limit concurrent site searches."""
+    global _SITE_SEARCH_SEM
+    if _SITE_SEARCH_SEM is None:
+        _SITE_SEARCH_SEM = asyncio.Semaphore(8)
+    return _SITE_SEARCH_SEM
+
 
 _CATEGORY_SEGMENTS = (
     "/product-category/", "/product-categories/",
@@ -155,6 +165,58 @@ async def _websearch_site_fallback(
             f"site:{domain} search for '{model_id}': {len(urls)} URLs -> {len(products)} products")
         span.set_attribute("product_count", len(products))
         return products
+
+
+async def _bounded_site_search(
+    browser: object,
+    domain: str,
+    model_id: str,
+    locale: str,
+    market: str,
+    timeout: float = 30.0,
+) -> list[ProductResult]:
+    """Run search_within_site with concurrency limit and timeout."""
+    async with _get_site_search_sem():
+        try:
+            return await asyncio.wait_for(
+                search_within_site(
+                    browser, domain, model_id,
+                    locale=locale, market=market,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Site search timed out after %.0fs: %s on %s",
+                timeout, model_id, domain,
+            )
+            return []
+
+
+async def _bounded_websearch_fallback(
+    browser: object,
+    domain: str,
+    model_id: str,
+    locale: str,
+    market: str,
+    timeout: float = 25.0,
+) -> list[ProductResult]:
+    """Run _websearch_site_fallback with concurrency limit and timeout."""
+    async with _get_site_search_sem():
+        try:
+            return await asyncio.wait_for(
+                _websearch_site_fallback(
+                    browser, domain, model_id,
+                    locale, market,
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Web-search fallback timed out after %.0fs: %s on %s",
+                timeout, model_id, domain,
+            )
+            return []
 
 
 async def _scrape_urls(
@@ -656,9 +718,9 @@ async def process_multi_model(
                             continue
                         for mid in missing_ids:
                             search_tasks.append(
-                                search_within_site(
+                                _bounded_site_search(
                                     browser, domain, mid,
-                                    locale=locale, market=market,
+                                    locale, market,
                                 )
                             )
                             search_meta.append((domain, mid))
@@ -697,7 +759,7 @@ async def process_multi_model(
                         for domain in domains_without:
                             for mid in missing[domain]:
                                 websearch_tasks.append(
-                                    _websearch_site_fallback(
+                                    _bounded_websearch_fallback(
                                         browser, domain, mid,
                                         locale, market,
                                     )
@@ -711,7 +773,7 @@ async def process_multi_model(
                         })
                         for domain, mid in failed_site_searches:
                             websearch_tasks.append(
-                                _websearch_site_fallback(
+                                _bounded_websearch_fallback(
                                     browser, domain, mid,
                                     locale, market,
                                 )
