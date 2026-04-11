@@ -69,6 +69,16 @@ async def get_cached_site_search(domain: str) -> SiteSearchConfig | None:
         if now - created > timedelta(days=_CACHE_TTL_DAYS):
             return None
 
+        # Invalidate strategies that keep failing
+        if (record.fail_count or 0) >= 3:
+            logger.info(
+                "Invalidating cached site search for %s: %d consecutive failures",
+                domain, record.fail_count,
+            )
+            await session.delete(record)
+            await session.commit()
+            return None
+
         return SiteSearchConfig(
             strategy_type=record.strategy_type,
             search_url_template=record.search_url_template,
@@ -110,6 +120,49 @@ async def save_site_search(domain: str, config: SiteSearchConfig) -> None:
 
         await session.commit()
         logger.info("Saved site search strategy for %s: %s", domain, config.strategy_type)
+
+
+async def record_site_search_failure(domain: str) -> None:
+    """Increment failure count for a domain's cached strategy."""
+    async with async_session() as session:
+        stmt = select(SiteSearchStrategy).where(
+            SiteSearchStrategy.domain == domain,
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record:
+            record.fail_count = (record.fail_count or 0) + 1
+            record.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            logger.debug("Site search fail_count for %s: %d", domain, record.fail_count)
+
+
+async def reset_site_search_failures(domain: str) -> None:
+    """Reset failure count on successful search."""
+    async with async_session() as session:
+        stmt = select(SiteSearchStrategy).where(
+            SiteSearchStrategy.domain == domain,
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record and (record.fail_count or 0) > 0:
+            record.fail_count = 0
+            record.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
+
+async def invalidate_site_search(domain: str) -> None:
+    """Delete cached strategy for a domain, forcing re-discovery."""
+    async with async_session() as session:
+        stmt = select(SiteSearchStrategy).where(
+            SiteSearchStrategy.domain == domain,
+        )
+        result = await session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if record:
+            await session.delete(record)
+            await session.commit()
+            logger.info("Invalidated site search strategy for %s", domain)
 
 
 # ------------------------------------------------------------------
@@ -723,6 +776,12 @@ async def search_within_site(
             span.set_attribute("product_count", len(products))
             span.set_attribute("summary",
                 f"URL template search on {domain} for '{model_id}': {len(products)} products")
+
+            if products:
+                await reset_site_search_failures(domain)
+            else:
+                await record_site_search_failure(domain)
+
             return products
 
         elif config.strategy_type == "search_input":
@@ -740,7 +799,9 @@ async def search_within_site(
                     # Find and fill the search input
                     search_input = await page.query_selector(config.search_input_selector)
                     if not search_input:
-                        span.set_attribute("summary", f"Search input '{config.search_input_selector}' not found")
+                        span.set_attribute("summary",
+                            f"Search input '{config.search_input_selector}' not found — invalidating")
+                        await invalidate_site_search(domain)
                         return []
 
                     await search_input.fill(model_id)
@@ -792,6 +853,12 @@ async def search_within_site(
             span.set_attribute("product_count", len(products))
             span.set_attribute("summary",
                 f"Search input on {domain} for '{model_id}': {len(products)} products")
+
+            if products:
+                await reset_site_search_failures(domain)
+            else:
+                await record_site_search_failure(domain)
+
             return products
 
     return []

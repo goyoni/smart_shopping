@@ -13,6 +13,7 @@ from src.mcp_servers.web_scraper_mcp.diagnostics import (
     ExtractionResult,
     FailureType,
     classify_http_failure,
+    looks_like_block_page,
 )
 from src.mcp_servers.web_scraper_mcp.extractors import extract_all_from_soup
 from src.mcp_servers.web_scraper_mcp.extractors.llm_soup_extract import extract_products_via_llm_soup
@@ -119,6 +120,19 @@ async def _do_http_attempt(
             access_method=access_method,
             failure_type=failure,
             failure_detail=f"status={status_code}" if status_code else str(error),
+            domain=domain,
+            page_type=page_type,
+        )
+
+    # Check for block page even on 200 with body >= 1000
+    block_type = looks_like_block_page(html)
+    if block_type:
+        _pipeline_event(domain, access_method,
+            f"block page detected ({proxy_label}): body={len(html)} → {block_type.value}")
+        return ExtractionResult(
+            access_method=access_method,
+            failure_type=block_type,
+            failure_detail=f"Block page (body={len(html)})",
             domain=domain,
             page_type=page_type,
         )

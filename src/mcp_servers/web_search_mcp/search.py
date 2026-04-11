@@ -193,8 +193,11 @@ def build_search_url(
     for URL construction.
     """
     search_text = refined_query if refined_query else query
-    suffix = get_buy_online_suffix(language=language, market=market)
-    augmented_query = f"{search_text} {suffix}"
+    if "site:" in search_text:
+        augmented_query = search_text
+    else:
+        suffix = get_buy_online_suffix(language=language, market=market)
+        augmented_query = f"{search_text} {suffix}"
     encoded = quote_plus(augmented_query)
     kl = get_region_code(market)
     return f"{_SEARCH_URL}?q={encoded}&kl={kl}"
@@ -436,8 +439,11 @@ async def search_products_via_searxng(
     SearXNG is unavailable or returns no results.
     """
     search_text = refined_query or query
-    suffix = get_buy_online_suffix(language=language, market=market)
-    full_query = f"{search_text} {suffix}"
+    if "site:" in search_text:
+        full_query = search_text
+    else:
+        suffix = get_buy_online_suffix(language=language, market=market)
+        full_query = f"{search_text} {suffix}"
     search_lang = get_market_language(market) or language
 
     searxng_base = settings.searxng_url.rstrip("/")

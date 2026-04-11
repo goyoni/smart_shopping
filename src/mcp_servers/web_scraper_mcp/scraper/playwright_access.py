@@ -14,6 +14,7 @@ from src.mcp_servers.web_scraper_mcp.diagnostics import (
     ExtractionResult,
     FailureType,
     classify_playwright_failure,
+    looks_like_block_page,
 )
 from src.mcp_servers.web_scraper_mcp.extractors import (
     extract_all_from_page,
@@ -223,12 +224,14 @@ async def _do_playwright_attempt(
         # Classify why we got nothing
         try:
             title = await page.title()
-            body_length = len(await page.content())
+            body_text = await page.content()
+            body_length = len(body_text)
         except Exception:
             title = ""
+            body_text = ""
             body_length = 0
 
-        failure = classify_playwright_failure(title, body_length)
+        failure = classify_playwright_failure(title, body_length, body_text=body_text)
         _pipeline_event(domain, "playwright",
             f"FAILED: {failure.value if failure else 'unknown'} (title='{title[:80]}', body={body_length})")
         return ExtractionResult(
@@ -287,6 +290,23 @@ async def _playwright_navigate(
                 access_method="playwright",
                 failure_type=FailureType.CLOUDFLARE_CAPTCHA,
                 failure_detail="Cloudflare CAPTCHA block",
+                domain=domain,
+                page_type=page_type,
+            )
+    except Exception:
+        pass
+
+    # Language-agnostic block detection on body content
+    try:
+        body_text = await page.content()
+        block_type = looks_like_block_page(body_text)
+        if block_type:
+            _pipeline_event(domain, "playwright",
+                f"block page detected via heuristic: {block_type.value} (body={len(body_text)})")
+            return ExtractionResult(
+                access_method="playwright",
+                failure_type=block_type,
+                failure_detail=f"Block page detected via heuristic (body={len(body_text)})",
                 domain=domain,
                 page_type=page_type,
             )
