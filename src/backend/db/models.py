@@ -122,6 +122,7 @@ class SiteSearchStrategy(Base):
     search_input_selector: Mapped[str] = mapped_column(Text, default="")  # CSS selector for search <input>
     submit_selector: Mapped[str] = mapped_column(Text, default="")  # CSS selector for submit button (optional)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

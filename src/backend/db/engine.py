@@ -47,5 +47,11 @@ async def init_db() -> None:
                     sync_conn.execute(
                         text("ALTER TABLE search_history ADD COLUMN cross_sellers_json TEXT")
                     )
+            if insp.has_table("site_search_strategies"):
+                cols = {c["name"] for c in insp.get_columns("site_search_strategies")}
+                if "fail_count" not in cols:
+                    sync_conn.execute(
+                        text("ALTER TABLE site_search_strategies ADD COLUMN fail_count INTEGER DEFAULT 0")
+                    )
 
         await conn.run_sync(_migrate)
