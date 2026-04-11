@@ -186,7 +186,7 @@ export default function ShoppingListPage() {
                     padding: "0.25rem",
                     flexShrink: 0,
                   }}
-                  title="Remove from list"
+                  title={t(locale, "list.remove")}
                 >
                   x
                 </button>

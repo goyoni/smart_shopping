@@ -1,6 +1,8 @@
 "use client";
 
 import { formatPrice } from "../lib/currency";
+import { useLocale } from "../lib/LocaleContext";
+import { t } from "../lib/i18n";
 
 interface CrossSellerData {
   name: string;
@@ -21,6 +23,7 @@ interface CrossSellerSectionProps {
 export type { CrossSellerData };
 
 export default function CrossSellerSection({ crossSellers }: CrossSellerSectionProps) {
+  const { locale } = useLocale();
   if (!crossSellers.length) return null;
 
   return (
@@ -34,7 +37,7 @@ export default function CrossSellerSection({ crossSellers }: CrossSellerSectionP
       }}
     >
       <h3 style={{ margin: "0 0 0.75rem", fontSize: "1.1rem", color: "#1d4ed8" }}>
-        Sellers with multiple items
+        {t(locale, "cross_seller.title")}
       </h3>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
         {crossSellers.map((cs, i) => (
@@ -78,7 +81,7 @@ export default function CrossSellerSection({ crossSellers }: CrossSellerSectionP
                     marginTop: "0.25rem",
                   }}
                 >
-                  Carries {cs.products.length} of your items:
+                  {t(locale, "cross_seller.carries_items", { count: cs.products.length })}
                 </div>
                 <ul
                   style={{
@@ -115,7 +118,7 @@ export default function CrossSellerSection({ crossSellers }: CrossSellerSectionP
                       color: "#16a34a",
                     }}
                   >
-                    Total: {formatPrice(cs.total_price, cs.currency)}
+                    {t(locale, "cross_seller.total")} {formatPrice(cs.total_price, cs.currency)}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: "0.4rem" }}>

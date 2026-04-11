@@ -1,6 +1,8 @@
 "use client";
 
 import { formatPrice } from "../lib/currency";
+import { useLocale } from "../lib/LocaleContext";
+import { t } from "../lib/i18n";
 import { type ProductResultData } from "./ProductCard";
 
 interface Seller {
@@ -28,6 +30,7 @@ function extractDomain(url: string): string {
 }
 
 export default function ModelSection({ modelId, products, onAddToList }: ModelSectionProps) {
+  const { locale } = useLocale();
   // Use the first product (best match) for the model header info
   const primary = products[0];
   if (!primary) return null;
@@ -110,7 +113,7 @@ export default function ModelSection({ modelId, products, onAddToList }: ModelSe
         <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: 600 }}>
           {modelId}
           <span style={{ color: "#6b7280", fontWeight: 400, marginInlineStart: "0.75rem", fontSize: "0.85rem" }}>
-            {allSellers.length} seller{allSellers.length !== 1 ? "s" : ""}
+            {t(locale, "product.sellers_count", { count: allSellers.length })}
           </span>
         </h3>
       </div>
@@ -199,7 +202,7 @@ export default function ModelSection({ modelId, products, onAddToList }: ModelSe
                 color: "#374151",
               }}
             >
-              + Add to list
+              {t(locale, "product.add_to_list")}
             </button>
           )}
         </div>
@@ -217,9 +220,9 @@ export default function ModelSection({ modelId, products, onAddToList }: ModelSe
           >
             <thead>
               <tr style={{ background: "#fafafa", textAlign: "start" }}>
-                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>Seller</th>
-                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>Price</th>
-                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>Contact</th>
+                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>{t(locale, "table.seller")}</th>
+                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>{t(locale, "table.price")}</th>
+                <th style={{ padding: "0.5rem 1rem", fontWeight: 600, color: "#374151" }}>{t(locale, "table.contact")}</th>
               </tr>
             </thead>
             <tbody>

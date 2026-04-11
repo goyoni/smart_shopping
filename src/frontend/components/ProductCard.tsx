@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { formatPrice } from "../lib/currency";
+import { useLocale } from "../lib/LocaleContext";
+import { t } from "../lib/i18n";
 import SellerList from "./SellerList";
 
 interface Seller {
@@ -86,6 +88,7 @@ function getProductUrl(sellers: Seller[]): string | null {
 export default function ProductCard({ product, onAddToList }: ProductCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [criteriaExpanded, setCriteriaExpanded] = useState(false);
+  const { locale } = useLocale();
 
   const bestPrice = getBestPrice(product.sellers);
   const domains = getSourceDomains(product.sellers);
@@ -182,7 +185,7 @@ export default function ProductCard({ product, onAddToList }: ProductCardProps) 
             {formatPrice(bestPrice.price, bestPrice.currency)}
           </div>
         ) : (
-          <div style={{ fontSize: "1rem", color: "#999", marginBottom: "0.5rem" }}>Price unavailable</div>
+          <div style={{ fontSize: "1rem", color: "#999", marginBottom: "0.5rem" }}>{t(locale, "product.price_unavailable")}</div>
         )}
 
         {/* Sellers indicator */}
@@ -203,8 +206,8 @@ export default function ProductCard({ product, onAddToList }: ProductCardProps) 
             }}
           >
             {expanded
-              ? "Hide sellers"
-              : `Available from ${product.sellers.length} seller${product.sellers.length > 1 ? "s" : ""}`}
+              ? t(locale, "product.hide_sellers")
+              : t(locale, "product.sellers_count", { count: product.sellers.length })}
           </button>
         )}
 
@@ -248,8 +251,8 @@ export default function ProductCard({ product, onAddToList }: ProductCardProps) 
                 }}
               >
                 {criteriaExpanded
-                  ? "Show less"
-                  : `+${criteriaEntries.length - 4} more`}
+                  ? t(locale, "product.show_less")
+                  : t(locale, "product.more_criteria", { count: criteriaEntries.length - 4 })}
               </button>
             )}
           </div>
@@ -291,7 +294,7 @@ export default function ProductCard({ product, onAddToList }: ProductCardProps) 
               color: "#374151",
             }}
           >
-            + Add to list
+            {t(locale, "product.add_to_list")}
           </button>
         )}
       </div>

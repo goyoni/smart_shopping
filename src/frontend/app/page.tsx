@@ -7,6 +7,7 @@ import { t } from "../lib/i18n";
 import ProductCard, { type ProductResultData } from "../components/ProductCard";
 import CrossSellerSection, { type CrossSellerData } from "../components/CrossSellerSection";
 import ModelSection from "../components/ModelSection";
+import DomainHealth from "../components/DomainHealth";
 
 interface HistoryEntry {
   session_id: string;
@@ -366,6 +367,8 @@ export default function Home() {
           </div>
         );
       })()}
+
+      <DomainHealth />
     </main>
   );
 }
