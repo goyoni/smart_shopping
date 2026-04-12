@@ -139,3 +139,20 @@ class ConsentSelector(Base):
     selector: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(20), default="universal")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class SellerContactCache(Base):
+    """Cached contact info (phone, email, WhatsApp) for a seller domain."""
+
+    __tablename__ = "seller_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    domain: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    whatsapp_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
