@@ -405,15 +405,17 @@ Each agent works in separate branch tagged with name.
 
 
 ### Phase 4: Refinement & Learning
-- Handle pagination for multi-page results
 - Re-learning when scraping fails
+- Price comparison - Search by multiple model ids for prices (e.g find a1234, b2345)
+
+- Multi-language product search
+
+### Phase 4.5: Refinement & Learning pt 2.
+- Handle pagination for multi-page results
 - Success rate tracking per domain
 - Shopping list (add/remove)
 - Manual "Contact Seller" buttons
-- Price comparison - Search by multiple model ids for prices (e.g find a1234, b2345)
 - RTL support (Hebrew, Arabic)
-- Multi-language product search
-
 
 ### Phase 5: Polish & Deploy
 - Mobile responsive design
