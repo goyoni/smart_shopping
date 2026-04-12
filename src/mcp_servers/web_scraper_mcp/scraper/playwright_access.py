@@ -28,6 +28,10 @@ from src.mcp_servers.web_scraper_mcp.strategy import (
 )
 from src.shared.browser import get_page
 
+from src.mcp_servers.web_scraper_mcp.seller_contact import (
+    enrich_sellers_inline,
+    extract_contact_from_page,
+)
 from src.mcp_servers.web_scraper_mcp.site_search import discover_site_search
 
 from .helpers import _IGNORE_DOMAINS, _pipeline_event
@@ -206,6 +210,18 @@ async def _do_playwright_attempt(
                 captured_responses, criteria,
                 cached, page_type,
             )
+
+        # Inline contact extraction from the page we already have
+        if products:
+            try:
+                contact = await extract_contact_from_page(page, domain)
+                if contact.has_contact:
+                    contact.source = "inline"
+                    await enrich_sellers_inline(products, contact, domain)
+                    _pipeline_event(domain, "contact",
+                        f"inline extraction: phone={contact.phone!r} email={contact.email!r}")
+            except Exception:
+                pass  # Non-critical
 
         # Discover site search strategy from any successfully loaded page
         try:

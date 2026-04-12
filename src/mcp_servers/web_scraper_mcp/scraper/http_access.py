@@ -20,6 +20,11 @@ from src.mcp_servers.web_scraper_mcp.extractors.llm_soup_extract import extract_
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.proxy import get_proxy_for_market
 
+from src.mcp_servers.web_scraper_mcp.seller_contact import (
+    enrich_sellers_inline,
+    extract_contact_from_soup as extract_contact,
+)
+
 from .helpers import _HTTP_HEADERS, _HTTP_TIMEOUT, _MAX_PAGES, _pipeline_event, get_http_headers
 from .pagination import build_page_url, deduplicate_products, detect_url_pagination
 
@@ -160,6 +165,16 @@ async def _do_http_attempt(
 
     if extraction_results:
         method_name, products = extraction_results[0]
+        # Inline contact extraction from the same soup
+        try:
+            contact = extract_contact(soup, domain)
+            if contact.has_contact:
+                contact.source = "inline"
+                await enrich_sellers_inline(products, contact, domain)
+                _pipeline_event(domain, access_method,
+                    f"inline contact: phone={contact.phone!r} email={contact.email!r}")
+        except Exception:
+            pass
         _pipeline_event(domain, access_method, f"extracted {len(products)} products via {method_name}", product_count=len(products))
         return ExtractionResult(
             products=products,

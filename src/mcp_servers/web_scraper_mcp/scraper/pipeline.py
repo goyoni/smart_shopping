@@ -13,6 +13,7 @@ from src.mcp_servers.web_scraper_mcp.db_cache import (
 )
 from src.mcp_servers.web_scraper_mcp.diagnostics import FailureType
 from src.mcp_servers.web_scraper_mcp.extractors import validate_results
+from src.mcp_servers.web_scraper_mcp.seller_contact import enrich_sellers
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.logging import get_logger
 from src.shared.models import ProductResult
@@ -147,7 +148,17 @@ async def scrape_page(
             validated = validate_results(result.products, product_query, domain)
             if validated:
                 await _cache_success(domain, result.page_type, result, url)
-                return _post_process(validated, product_query, domain)
+                processed = _post_process(validated, product_query, domain)
+                # Enrich sellers missing contact info (Phase B)
+                if processed:
+                    try:
+                        processed = await enrich_sellers(
+                            processed, browser, market=market,
+                        )
+                    except Exception as exc:
+                        _pipeline_event(domain, "contact",
+                            f"seller enrichment failed: {exc}")
+                return processed
             else:
                 last_failure = FailureType.LOW_QUALITY
                 await mark_validation_failure(domain, page_type)

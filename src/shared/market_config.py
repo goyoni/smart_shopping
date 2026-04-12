@@ -118,6 +118,26 @@ def get_rtl_languages() -> list[str]:
             if info.get("direction") == "rtl"]
 
 
+def get_contact_paths(market: str | None = None) -> list[str]:
+    """Return contact page URL paths for a market's language.
+
+    Always includes universal English paths. Adds language-specific
+    paths when a market is provided.
+    """
+    base = ["/contact", "/contact-us", "/about", "/about-us", "/contactus"]
+    if not market:
+        return base
+
+    lang = get_market_language(market)
+    if not lang:
+        return base
+
+    langs = _load_languages()
+    info = langs.get("languages", {}).get(lang, {})
+    extra = info.get("contact_paths", [])
+    return base + extra
+
+
 def get_lang_to_market_map() -> dict[str, str]:
     """Build a language-to-market mapping for languages tied to one country.
 

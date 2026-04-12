@@ -10,6 +10,7 @@ from mcp.types import TextContent, Tool
 from src.mcp_servers.web_scraper_mcp.db_cache import get_cached_strategy, get_domain_health, save_strategy
 from src.mcp_servers.web_scraper_mcp.health_check import check_all_strategies, get_stale_strategies
 from src.mcp_servers.web_scraper_mcp.scraper import scrape_page
+from src.mcp_servers.web_scraper_mcp.seller_contact import get_cached_contact, scrape_seller_contact
 from src.mcp_servers.web_scraper_mcp.strategy import ScrapingStrategy
 from src.shared.browser import get_browser
 
@@ -83,6 +84,25 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_seller_contact",
+            description=(
+                "Get cached contact info (phone, email, WhatsApp) for a seller domain, "
+                "or scrape the seller's website if not cached."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "domain": {"type": "string", "description": "Seller domain to look up"},
+                    "market": {
+                        "type": "string",
+                        "description": "Two-letter market code",
+                        "default": "us",
+                    },
+                },
+                "required": ["domain"],
+            },
+        ),
+        Tool(
             name="check_strategy_health",
             description=(
                 "Run health checks on stale or degraded scraping strategies. "
@@ -128,6 +148,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         strategy = ScrapingStrategy(**strategy_data)
         await save_strategy(domain, strategy)
         return [TextContent(type="text", text=json.dumps({"status": "saved"}))]
+
+    elif name == "get_seller_contact":
+        domain = arguments["domain"]
+        market = arguments.get("market", "us")
+        cached = await get_cached_contact(domain)
+        if cached and cached.has_contact:
+            return [TextContent(type="text", text=json.dumps({
+                "phone": cached.phone, "email": cached.email,
+                "whatsapp_url": cached.whatsapp_url, "source": cached.source,
+                "status": "cached",
+            }))]
+        async with get_browser() as browser:
+            contact = await scrape_seller_contact(browser, domain, market)
+        return [TextContent(type="text", text=json.dumps({
+            "phone": contact.phone, "email": contact.email,
+            "whatsapp_url": contact.whatsapp_url, "source": contact.source,
+            "status": "scraped" if contact.has_contact else "not_found",
+        }))]
 
     elif name == "domain_health":
         health = await get_domain_health()

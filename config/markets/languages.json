@@ -1,10 +1,11 @@
 {
   "languages": {
-    "he": {"name": "Hebrew", "direction": "rtl"},
-    "ar": {"name": "Arabic", "direction": "rtl"},
-    "en": {"name": "English", "direction": "ltr"},
-    "de": {"name": "German", "direction": "ltr"},
-    "fr": {"name": "French", "direction": "ltr"}
+    "he": {"name": "Hebrew", "direction": "rtl", "contact_paths": ["/צור-קשר"]},
+    "ar": {"name": "Arabic", "direction": "rtl", "contact_paths": ["/اتصل-بنا"]},
+    "en": {"name": "English", "direction": "ltr", "contact_paths": []},
+    "el": {"name": "Greek", "direction": "ltr", "contact_paths": ["/επικοινωνία", "/epikoinonia"]},
+    "de": {"name": "German", "direction": "ltr", "contact_paths": ["/kontakt"]},
+    "fr": {"name": "French", "direction": "ltr", "contact_paths": ["/nous-contacter"]}
   },
   "buy_online_suffixes": {
     "he": "\u05e7\u05e0\u05d9\u05d9\u05d4 \u05d0\u05d5\u05e0\u05dc\u05d9\u05d9\u05df",
