@@ -25,8 +25,14 @@ def validate_results(
         if not p.name or len(p.name) < 3:
             _reject("name_too_short")
             continue
-        if p.name.strip() in garbage:
+        # Normalize: collapse newlines/tabs to spaces
+        p.name = " ".join(p.name.split())
+        stripped_name = p.name.strip()
+        if stripped_name in garbage:
             _reject("garbage_name")
+            continue
+        if stripped_name.endswith(":"):
+            _reject("heading_name")
             continue
         if len(p.name) < 5 and not p.model_id:
             _reject("generic_short_name")

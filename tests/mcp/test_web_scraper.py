@@ -63,10 +63,22 @@ class TestParsePrice:
         assert parse_price("25802480") is None
 
     def test_accepts_high_but_sane_price(self):
-        assert parse_price("999,999") == 999999.0
+        assert parse_price("99,999") == 99999.0
 
-    def test_rejects_above_million(self):
+    def test_rejects_above_100k(self):
         assert parse_price("1,500,000") is None
+
+    def test_ambiguous_comma_prefers_decimal_when_large(self):
+        # "707,599" as thousands = 707599 (> 10K), so interpret as decimal
+        assert parse_price("707,599") == 707.599
+
+    def test_ambiguous_comma_keeps_thousands_when_small(self):
+        # "1,299" has 3 digits after comma but only 2 parts
+        assert parse_price("1,299") == 1299.0
+
+    def test_ambiguous_comma_three_digit_small(self):
+        # "9,500" -> 2 parts, last has 3 digits, as_thousands=9500 <= 100K
+        assert parse_price("9,500") == 9500.0
 
 
 class TestExtractDomain:

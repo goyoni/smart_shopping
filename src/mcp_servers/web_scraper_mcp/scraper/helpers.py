@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 
 _MAX_PRODUCTS_PER_SITE = 50
 _MAX_PAGES = 3
-_MAX_SANE_PRICE = 1_000_000
+_MAX_SANE_PRICE = 100_000
 
 # CSS selectors tried in order to find a "next page" link
 _NEXT_PAGE_CANDIDATES: list[str] = [
@@ -116,6 +116,12 @@ def parse_price(text: str) -> float | None:
         parts = cleaned.split(",")
         if len(parts[-1]) == 2:
             cleaned = cleaned.replace(",", ".")
+        elif len(parts) == 2 and len(parts[-1]) == 3:
+            as_thousands = float(cleaned.replace(",", ""))
+            if as_thousands > _MAX_SANE_PRICE:
+                cleaned = cleaned.replace(",", ".")
+            else:
+                cleaned = cleaned.replace(",", "")
         else:
             cleaned = cleaned.replace(",", "")
     try:

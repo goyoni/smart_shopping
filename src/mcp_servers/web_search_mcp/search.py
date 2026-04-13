@@ -447,11 +447,15 @@ async def search_products_via_searxng(
     search_lang = get_market_language(market) or language
 
     searxng_base = settings.searxng_url.rstrip("/")
+    # Bing ignores language/region params for non-English markets,
+    # returning irrelevant results (Czech/Lithuanian for Israeli queries).
+    # Restrict to engines that respect market targeting.
     params = {
         "q": full_query,
         "format": "json",
         "language": f"{search_lang}-{market.upper()}",
         "safesearch": "0",
+        "engines": "brave,duckduckgo",
     }
     search_url = f"{searxng_base}/search?{_urlencode_params(params)}"
 

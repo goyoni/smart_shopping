@@ -26,15 +26,35 @@ def _post_process(
     if product_query and products:
         query_lower = product_query.lower()
         query_tokens = [t for t in query_lower.split() if len(t) >= 3]
-        matched = [
-            p for p in products
-            if query_lower in p.name.lower()
-            or (p.model_id and query_lower in p.model_id.lower())
-            or any(
-                tok in p.name.lower() or (p.model_id and tok in p.model_id.lower())
-                for tok in query_tokens
-            )
+
+        # Tokens like "pro", "max", "air" match too many unrelated products.
+        # Significant = length >= 4, or all-caps (acronyms like "IPL").
+        _GENERIC_TOKENS = {
+            "pro", "max", "air", "new", "mini", "plus", "one", "lite",
+            "neo", "duo", "the", "for", "and", "with",
+        }
+        significant = [
+            t for t in query_tokens
+            if len(t) >= 4 or t.upper() == t or t not in _GENERIC_TOKENS
         ]
+        generic = [t for t in query_tokens if t not in significant]
+
+        def _is_relevant(p: ProductResult) -> bool:
+            name_l = p.name.lower()
+            mid_l = p.model_id.lower() if p.model_id else ""
+            text = f"{name_l} {mid_l}"
+            if query_lower in text:
+                return True
+            sig_hits = sum(1 for t in significant if t in text)
+            if sig_hits >= 2:
+                return True
+            if sig_hits >= 1:
+                gen_hits = sum(1 for t in generic if t in text)
+                if gen_hits >= 1 or len(significant) <= 1:
+                    return True
+            return False
+
+        matched = [p for p in products if _is_relevant(p)]
         if matched:
             filtered_count = len(products) - len(matched)
             if filtered_count > 0:
@@ -42,7 +62,7 @@ def _post_process(
                     f"Relevance filter: {len(matched)}/{len(products)} match query '{product_query}', dropped {filtered_count} unrelated",
                     matched_count=len(matched), filtered_count=filtered_count)
             products = matched
-        elif len(products) == 1:
+        elif len(products) == 1 and "|" not in products[0].name:
             _pipeline_event(domain, "post_process",
                 f"Single product kept despite no name match (likely different language/script)")
         else:

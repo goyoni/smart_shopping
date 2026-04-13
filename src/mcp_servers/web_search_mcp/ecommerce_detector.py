@@ -1,8 +1,13 @@
 """E-commerce site detection and classification.
 
-Uses heuristic signals from search results (URL path patterns, title/snippet
-keywords, market TLD matching) to score URLs.  No hardcoded domain list —
-the web search engine is trusted to surface relevant sites for any market.
+Uses a default-allow approach: the search engine is trusted to surface
+relevant results for a shopping query, so most URLs are assumed to be
+potential e-commerce sites.  Only known non-commerce categories (social
+media, news, manufacturer homepages, forums, blogs) are rejected.
+
+Positive signals (ecommerce path patterns, keywords) boost confidence
+but are not required — an unknown site passes by default and the scraper
+decides whether it actually has products.
 
 Domain learning (record_domain_hit / record_domain_success) persists
 observed ecommerce domains to DB for analytics; it does NOT influence scoring.
@@ -26,32 +31,42 @@ from src.shared.market_config import (
 
 logger = get_logger(__name__)
 
+# ── Rejection lists ──────────────────────────────────────────────────────
+
 _NON_ECOMMERCE_DOMAINS: set[str] = {
-    "youtube.com", "wikipedia.org", "reddit.com", "facebook.com",
-    "twitter.com", "x.com", "instagram.com", "linkedin.com",
-    "tiktok.com", "pinterest.com", "quora.com", "medium.com",
-    "github.com", "stackoverflow.com", "bbc.com", "cnn.com",
-    # Manual / documentation sites
+    # Social media
+    "youtube.com", "facebook.com", "twitter.com", "x.com",
+    "instagram.com", "linkedin.com", "tiktok.com", "pinterest.com",
+    # Knowledge / reference
+    "wikipedia.org", "reddit.com", "quora.com", "medium.com",
+    "stackoverflow.com", "github.com", "zhihu.com",
+    # News / media
+    "bbc.com", "cnn.com",
+    # Manuals / documentation
     "manualslib.com", "manuals.co.uk", "manua.ls",
-    # Q&A / knowledge sites
-    "zhihu.com",
+    # Medical / industrial (not consumer e-commerce)
+    "bbraun.com", "bbraun.cz", "bbraunshop.cz",
 }
+
+_MANUFACTURER_PATTERNS: tuple[str, ...] = (
+    "braun.", "philips.", "samsung.", "lg.", "bosch.",
+    "siemens.", "panasonic.", "sony.", "dyson.",
+)
+
+_NON_ECOMMERCE_PATH_PATTERNS: tuple[str, ...] = (
+    "/blog/", "/news/", "/article/", "/articles/",
+    "/forum/", "/thread/", "/wiki/",
+)
+
+# ── Boost signals ────────────────────────────────────────────────────────
 
 _ECOMMERCE_PATH_PATTERNS: list[str] = [
     "/products/", "/product/", "/shop/", "/store/",
-    "/dp/", "/item/", "/buy/", "/p/", "/catalog/",
+    "/dp/", "/item/", "/items/", "/buy/", "/p/", "/catalog",
     "/collections/", "/listing/",
 ]
 
-# Universal ecommerce keywords — work across languages via common patterns
-# found in URLs, structured data, and page content.
-_ECOMMERCE_KEYWORDS: list[str] = [
-    # English (lingua franca of the web)
-    "price", "buy", "shop", "add to cart", "in stock",
-    "free shipping", "delivery", "order",
-    # Common patterns that appear in any language (currency symbols, numbers)
-    "€", "$", "₪", "£", "¥",
-]
+_BASE_CONFIDENCE = 0.5
 
 
 async def record_domain_hit(domain: str, market: str, source: str = "search") -> None:
@@ -137,24 +152,32 @@ def extract_domain(url: str) -> str:
     return domain
 
 
+def _is_manufacturer_domain(domain: str) -> bool:
+    """Detect manufacturer/brand sites that aren't retail stores."""
+    for pattern in _MANUFACTURER_PATTERNS:
+        if domain.startswith(pattern) or f".{pattern}" in domain:
+            return True
+    return False
+
+
 def detect_ecommerce(
     url: str,
     title: str = "",
     snippet: str = "",
 ) -> EcommerceSignal:
-    """Score a URL for e-commerce likelihood using heuristic signals.
+    """Score a URL for e-commerce likelihood.
 
-    Signals: URL path patterns, title/snippet keywords.
-    Market TLD boosting is applied separately in identify_ecommerce_sites().
+    Default-allow: starts at base confidence and only rejects known
+    non-commerce categories.  Positive signals boost confidence but
+    are not required.  The scraper is the real filter.
 
     Returns an EcommerceSignal with confidence score and contributing signals.
-    Threshold for is_ecommerce: 0.3
     """
     domain = extract_domain(url)
-    confidence = 0.0
-    signals: list[str] = []
+    confidence = _BASE_CONFIDENCE
+    signals: list[str] = ["default_allow"]
 
-    # Fast rejection for known non-ecommerce
+    # ── Hard rejections ──────────────────────────────────────────────
     for non_ec in _NON_ECOMMERCE_DOMAINS:
         if domain == non_ec or domain.endswith(f".{non_ec}"):
             return EcommerceSignal(
@@ -162,58 +185,35 @@ def detect_ecommerce(
                 confidence=0.0, signals=["known_non_ecommerce"],
             )
 
-    # Reject manufacturer / brand sites (rarely have prices or add-to-cart)
     if _is_manufacturer_domain(domain):
         return EcommerceSignal(
             url=url, domain=domain, is_ecommerce=False,
             confidence=0.0, signals=["manufacturer_site"],
         )
 
-    # URL path patterns
+    # ── Penalties (hard reject for non-commerce content paths) ──────
     path = urlparse(url).path.lower()
+    for pattern in _NON_ECOMMERCE_PATH_PATTERNS:
+        if pattern in path:
+            return EcommerceSignal(
+                url=url, domain=domain, is_ecommerce=False,
+                confidence=0.0,
+                signals=[f"non_ecommerce_path:{pattern.strip('/')}"],
+            )
+
+    # ── Boosts (optional, not required) ──────────────────────────────
     for pattern in _ECOMMERCE_PATH_PATTERNS:
         if pattern in path:
             confidence += 0.4
-            signals.append(f"path_pattern:{pattern.strip('/')}")
+            signals = [f"path_pattern:{pattern.strip('/')}"]
             break
 
-    # Keyword analysis in title and snippet
-    combined_text = f"{title} {snippet}".lower()
-    keyword_score = 0.0
-    matched_keywords: list[str] = []
-
-    for keyword in _ECOMMERCE_KEYWORDS:
-        if keyword in combined_text:
-            keyword_score += 0.15
-            matched_keywords.append(keyword)
-            if keyword_score >= 0.6:
-                break
-
-    if matched_keywords:
-        confidence += min(keyword_score, 0.6)
-        signals.append(f"keywords:{','.join(matched_keywords[:3])}")
-
-    is_ecommerce = confidence >= 0.3
+    is_ecommerce = confidence > 0.0
 
     return EcommerceSignal(
         url=url, domain=domain, is_ecommerce=is_ecommerce,
         confidence=round(confidence, 2), signals=signals,
     )
-
-
-def _is_manufacturer_domain(domain: str) -> bool:
-    """Detect manufacturer/brand sites that aren't retail stores."""
-    # Match brand.TLD or brand.country (e.g. braun.hu, samsung.com, lg.com)
-    # but not brand stores like apple.com which also sell directly.
-    # We use a short blocklist of common patterns.
-    _MANUFACTURER_PATTERNS = (
-        "braun.", "philips.", "samsung.", "lg.", "bosch.",
-        "siemens.", "panasonic.", "sony.", "dyson.",
-    )
-    for pattern in _MANUFACTURER_PATTERNS:
-        if domain.startswith(pattern) or f".{pattern}" in domain:
-            return True
-    return False
 
 
 @lru_cache(maxsize=1)
@@ -247,8 +247,9 @@ async def identify_ecommerce_sites(
 ) -> list[EcommerceSignal]:
     """Filter and sort URLs by e-commerce confidence.
 
-    Uses heuristic signals (path patterns, keywords) and market TLD boosting.
-    No hardcoded domain list — trusts the search engine to surface relevant sites.
+    Default-allow approach: trusts the search engine to surface relevant
+    sites.  Only rejects known non-commerce categories and foreign-market
+    domains.
 
     Args:
         urls_data: List of dicts with 'url', optionally 'title' and 'snippet'.

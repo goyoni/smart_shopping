@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from opentelemetry import trace as otel_trace
 
-_MAX_SANE_PRICE = 1_000_000
+_MAX_SANE_PRICE = 100_000
 _MAX_PRODUCTS_PER_SITE = 50
 
 
@@ -33,6 +33,13 @@ def _parse_price(text: str) -> float | None:
         parts = cleaned.split(",")
         if len(parts[-1]) == 2:
             cleaned = cleaned.replace(",", ".")
+        elif len(parts) == 2 and len(parts[-1]) == 3:
+            # Ambiguous: "707,599" could be 707599 (thousands) or 707.599 (decimal)
+            as_thousands = float(cleaned.replace(",", ""))
+            if as_thousands > _MAX_SANE_PRICE:
+                cleaned = cleaned.replace(",", ".")
+            else:
+                cleaned = cleaned.replace(",", "")
         else:
             cleaned = cleaned.replace(",", "")
     try:
