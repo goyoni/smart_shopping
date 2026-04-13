@@ -6,6 +6,7 @@ and orchestrates the full search workflow.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from opentelemetry import trace
@@ -279,35 +280,36 @@ class MainAgent:
                         self.state.status = SearchStatus.COMPLETED
                         return self.state
 
-                    # Step 5: Scrape top e-commerce sites
-                    sites_to_scrape = ecommerce_signals[:_MAX_SITES_TO_SCRAPE]
+                    # Step 5: Dedup by domain and scrape in parallel
+                    seen_domains: dict[str, object] = {}
+                    for sig in ecommerce_signals:
+                        if sig.domain not in seen_domains:
+                            seen_domains[sig.domain] = sig
+                    sites_to_scrape = list(seen_domains.values())[:_MAX_SITES_TO_SCRAPE]
+
                     root_span.add_event("decision.sites_to_scrape", {
                         "total_ecommerce": len(ecommerce_signals),
+                        "unique_domains": len(seen_domains),
                         "scraping_count": len(sites_to_scrape),
                         "sites": json.dumps([{"domain": s.domain, "confidence": s.confidence, "signals": s.signals} for s in sites_to_scrape], ensure_ascii=False),
-                        "summary": f"Scraping top {len(sites_to_scrape)}/{len(ecommerce_signals)} ecommerce sites: {', '.join(s.domain for s in sites_to_scrape)}",
+                        "summary": f"Scraping {len(sites_to_scrape)} sites ({len(seen_domains)} unique domains from {len(ecommerce_signals)} URLs): {', '.join(s.domain for s in sites_to_scrape)}",
                     })
                     total_sites = len(sites_to_scrape)
                     await self._add_status(f"Scraping product pages (0/{total_sites})...")
 
                     locale = _build_locale(language, market)
+                    _scrape_sem = asyncio.Semaphore(5)
+                    _completed = 0
+                    _completed_lock = asyncio.Lock()
 
-                    with operation_span(
-                        _tracer, "scrape_sites",
-                        input=json.dumps(
-                            [{"domain": s.domain, "url": s.url} for s in sites_to_scrape],
-                            ensure_ascii=False,
-                        ),
-                        site_count=len(sites_to_scrape),
-                    ) as scrape_op:
-                        all_products: list[ProductResult] = []
-                        for idx, signal in enumerate(sites_to_scrape, 1):
+                    async def _scrape_one(signal):
+                        nonlocal _completed
+                        async with _scrape_sem:
                             try:
                                 with operation_span(
                                     _tracer, f"scrape_site:{signal.domain}",
                                     input=signal.url,
                                 ) as site_op:
-                                    await self._add_status(f"Scraping product pages ({idx}/{total_sites}): {signal.domain}")
                                     products = await scrape_page(
                                         browser, signal.url, query,
                                         locale=locale,
@@ -318,7 +320,6 @@ class MainAgent:
                                         for p in products:
                                             if not p.category:
                                                 p.category = category
-                                    all_products.extend(products)
                                     site_op.set_attribute("product_count", len(products))
                                     site_op.set_attribute("output", json.dumps({
                                         "url": signal.url,
@@ -335,9 +336,31 @@ class MainAgent:
                                             for p in products[:20]
                                         ],
                                     }, ensure_ascii=False))
+                                    return products
                             except Exception:
                                 logger.warning("Failed to scrape %s", signal.url, exc_info=True)
-                                continue
+                                return []
+                            finally:
+                                async with _completed_lock:
+                                    _completed += 1
+                                    await self._add_status(
+                                        f"Scraping product pages ({_completed}/{total_sites})..."
+                                    )
+
+                    with operation_span(
+                        _tracer, "scrape_sites",
+                        input=json.dumps(
+                            [{"domain": s.domain, "url": s.url} for s in sites_to_scrape],
+                            ensure_ascii=False,
+                        ),
+                        site_count=len(sites_to_scrape),
+                    ) as scrape_op:
+                        results_lists = await asyncio.gather(
+                            *[_scrape_one(sig) for sig in sites_to_scrape]
+                        )
+                        all_products: list[ProductResult] = []
+                        for product_list in results_lists:
+                            all_products.extend(product_list)
 
                         scrape_op.set_attribute("product_count", len(all_products))
                         scrape_op.set_attribute("output", json.dumps({
@@ -356,13 +379,15 @@ class MainAgent:
                             "deduplicated_count": len(all_products),
                         }))
 
-                # Step 7: Validate results
-                if all_products and criteria:
+                # Step 7: Validate results (always run — drop null-price products)
+                if all_products:
                     with operation_span(
                         _tracer, "validate_results",
                         input=json.dumps({"product_count": len(all_products)}),
                     ) as val_op:
-                        validated = validate_results(all_products, criteria)
+                        validated = validate_results(
+                            all_products, criteria if criteria else None,
+                        )
                         valid_products = [
                             v["product"] for v in validated if v["valid"]
                         ]

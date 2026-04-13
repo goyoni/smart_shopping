@@ -11,7 +11,7 @@ from src.shared.models import CrossSeller, ProductResult, SearchStatus
 
 StatusCallback = Callable[[str, str], Awaitable[None]]
 
-_MAX_SITES_TO_SCRAPE = 8
+_MAX_SITES_TO_SCRAPE = 20
 
 
 def extract_category(query: str) -> str | None:
